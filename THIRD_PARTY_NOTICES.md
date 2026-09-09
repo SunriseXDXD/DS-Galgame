@@ -6,9 +6,20 @@
 
 - [3DM「大肥鱼」专栏考据](https://www.3dmgame.com/original/3746336.html)
 - [梗鲸 / DeepSeek 酱语录图库](https://ai-meme.cdqyfdbymn.me/)
+- [EDMOK/blue-fish-archive](https://github.com/EDMOK/blue-fish-archive)
 - [PC2005-cloud/dsh-pet](https://github.com/PC2005-cloud/dsh-pet)
 
 这些链接用于说明社区梗文化背景和项目早期方向。本次还人工浏览了维护者提供的 `blue-fish-archive/large/`，仅归纳“思考、困惑、担心、兴奋、傲娇”等高层动作和表情语义；文件没有复制进项目，也没有作为图像输入提交给生成器。相关页面、角色二创与原画权利仍属于各自权利人。
+
+## 文本人设参考（综合改写）
+
+- [OMGLogic/dsh-whale-persona](https://github.com/OMGLogic/dsh-whale-persona)
+- [Kaalia0912/dsh-whale-musume-persona](https://github.com/Kaalia0912/dsh-whale-musume-persona)
+- [Neko3000/deepseek-whalechan](https://github.com/Neko3000/deepseek-whalechan)
+- [Sutera-Diffusus/dsh-whale-musume](https://github.com/Sutera-Diffusus/dsh-whale-musume)
+- [崔亮：DeepSeek 真的内置了一个“鲸鱼娘”人设吗？](https://cuiliang.ai/posts/deepseek-whale-girl-role-dsl/)
+
+这些资料仅用于交叉归纳米饭、尾鳍、聪明但慵懒、傲娇而可靠等社区共通机制；项目提示词与 JSON 样例均重新编写，没有整段复制来源文字。它们都是第三方或社区资料，不构成 DeepSeek 官方人设说明。继续复用来源中的角色卡、提示词模板或图片时，应分别核对其仓库许可；其中 DeepSeek Whale-chan 仓库将规范文档与 Prompt 模板标为 CC BY-NC-SA 4.0。
 
 ## 当前人物美术
 

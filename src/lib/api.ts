@@ -1,4 +1,5 @@
 import type { ChatTurn, ModelId } from "../types";
+import { normalizeChatMessages } from "../../shared/chatRequest.mjs";
 
 interface StreamOptions {
   apiKey: string;
@@ -14,6 +15,24 @@ export class ApiTimeoutError extends Error {
   constructor(message = "海底线路等待超时") {
     super(message);
     this.name = "ApiTimeoutError";
+  }
+}
+
+interface ApiStreamStats {
+  frameCount: number;
+  contentCharacters: number;
+  reasoningCharacters: number;
+  finishReason: string;
+  done: boolean;
+}
+
+export class ApiEmptyResponseError extends Error {
+  readonly stats: Readonly<ApiStreamStats>;
+
+  constructor(stats: ApiStreamStats) {
+    super("上游返回空回复");
+    this.name = "ApiEmptyResponseError";
+    this.stats = Object.freeze({ ...stats });
   }
 }
 
@@ -54,43 +73,10 @@ function parseErrorPayload(raw: string): string {
   }
 }
 
-export async function streamDeepSeek({
-  apiKey,
-  authMode,
-  sessionId,
-  model,
-  messages,
-  signal,
-  onDelta,
-}: StreamOptions): Promise<string> {
-  const trimmedApiKey = apiKey.trim();
-  if (authMode === "byok") {
-    const validationError = validateByokApiKey(trimmedApiKey);
-    if (validationError) throw new Error(validationError);
-  }
-
-  const response = await fetch("/api/chat", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-DS-Auth-Mode": authMode,
-      "X-DS-Session-ID": sessionId,
-      ...(authMode === "byok" ? { "X-DeepSeek-API-Key": trimmedApiKey } : {}),
-    },
-    body: JSON.stringify({
-      model,
-      messages: messages
-        .slice(-24)
-        .map(({ role, content }) => ({ role, content: content.slice(0, 8_000) })),
-    }),
-    signal,
-  });
-
-  if (!response.ok) {
-    const detail = parseErrorPayload(await response.text());
-    if (response.status === 504) throw new ApiTimeoutError(detail);
-    throw new Error(detail);
-  }
+async function consumeSseResponse(
+  response: Response,
+  onDelta?: (content: string) => void,
+): Promise<string> {
   if (!response.body) throw new Error("浏览器未收到流式响应");
   if (!response.headers.get("content-type")?.toLowerCase().includes("text/event-stream")) {
     throw new Error("代理返回了非流式响应");
@@ -101,8 +87,13 @@ export async function streamDeepSeek({
   let buffer = "";
   let content = "";
   let streamError = "";
-  let finishReason = "";
-  let sawDone = false;
+  const stats: ApiStreamStats = {
+    frameCount: 0,
+    contentCharacters: 0,
+    reasoningCharacters: 0,
+    finishReason: "",
+    done: false,
+  };
 
   const consumeEvent = (event: string): boolean => {
     const data = event
@@ -113,9 +104,10 @@ export async function streamDeepSeek({
       .trim();
     if (!data) return false;
     if (data === "[DONE]") {
-      sawDone = true;
+      stats.done = true;
       return true;
     }
+    stats.frameCount += 1;
     try {
       const chunk = JSON.parse(data) as {
         error?: unknown;
@@ -132,12 +124,15 @@ export async function streamDeepSeek({
       }
       const choice = Array.isArray(chunk.choices) ? chunk.choices[0] : undefined;
       if (choice?.finish_reason != null) {
-        if (typeof choice.finish_reason === "string") finishReason = choice.finish_reason;
+        if (typeof choice.finish_reason === "string") stats.finishReason = choice.finish_reason;
         else streamError ||= "malformed_frame";
       }
+      const reasoning = choice?.delta?.reasoning_content;
+      if (typeof reasoning === "string") stats.reasoningCharacters += reasoning.length;
       const delta = choice?.delta?.content;
       if (typeof delta === "string" && delta) {
         content += delta;
+        stats.contentCharacters += delta.length;
         onDelta?.(content);
       } else if (delta != null && typeof delta !== "string") {
         streamError ||= "malformed_frame";
@@ -169,15 +164,86 @@ export async function streamDeepSeek({
     if (streamError === "timeout") throw new ApiTimeoutError();
     throw new Error("DeepSeek 响应流意外中断");
   }
-  if (!sawDone) throw new Error("DeepSeek 响应流未完整结束");
-  if (finishReason !== "stop") {
-    if (finishReason === "length") {
+  if (!stats.done) throw new Error("DeepSeek 响应流未完整结束");
+  if (stats.finishReason !== "stop") {
+    if (stats.finishReason === "length") {
       throw new Error("回答达到长度上限，请缩小问题后重试");
     }
-    throw new Error(finishReason ? `回答未正常结束（${finishReason}）` : "DeepSeek 响应缺少结束标记");
+    throw new Error(stats.finishReason
+      ? `回答未正常结束（${stats.finishReason}）`
+      : "DeepSeek 响应缺少结束标记");
   }
-  if (!content.trim()) {
-    throw new Error("模型没有返回可见内容");
-  }
+  if (!content.trim()) throw new ApiEmptyResponseError(stats);
   return content;
+}
+
+type StreamAttempt = "structured" | "text-retry";
+
+function warnEmptyResponse(error: ApiEmptyResponseError, attempt: StreamAttempt): void {
+  console.warn("DeepSeek empty response", {
+    attempt,
+    frameCount: error.stats.frameCount,
+    contentCharacters: error.stats.contentCharacters,
+    reasoningCharacters: error.stats.reasoningCharacters,
+    finishReason: error.stats.finishReason,
+    done: error.stats.done,
+  });
+}
+
+export async function streamDeepSeek({
+  apiKey,
+  authMode,
+  sessionId,
+  model,
+  messages,
+  signal,
+  onDelta,
+}: StreamOptions): Promise<string> {
+  const trimmedApiKey = apiKey.trim();
+  if (authMode === "byok") {
+    const validationError = validateByokApiKey(trimmedApiKey);
+    if (validationError) throw new Error(validationError);
+  }
+
+  const normalizedMessages = normalizeChatMessages(messages);
+  const request = async (attempt: StreamAttempt): Promise<string> => {
+    const response = await fetch("/api/chat", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-DS-Auth-Mode": authMode,
+        "X-DS-Session-ID": sessionId,
+        ...(authMode === "byok" ? { "X-DeepSeek-API-Key": trimmedApiKey } : {}),
+      },
+      body: JSON.stringify({
+        model,
+        messages: normalizedMessages,
+        ...(attempt === "text-retry" ? { outputFormat: "text" } : {}),
+      }),
+      signal,
+    });
+
+    if (!response.ok) {
+      const detail = parseErrorPayload(await response.text());
+      if (response.status === 504) throw new ApiTimeoutError(detail);
+      throw new Error(detail);
+    }
+    return consumeSseResponse(response, onDelta);
+  };
+
+  try {
+    return await request("structured");
+  } catch (error) {
+    if (!(error instanceof ApiEmptyResponseError)) throw error;
+    warnEmptyResponse(error, "structured");
+    if (signal.aborted) throw error;
+    onDelta?.("");
+  }
+
+  try {
+    return await request("text-retry");
+  } catch (error) {
+    if (error instanceof ApiEmptyResponseError) warnEmptyResponse(error, "text-retry");
+    throw error;
+  }
 }

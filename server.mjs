@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
+import { createDeepSeekBody, normalizeChatMessages } from "./shared/chatRequest.mjs";
 
 const ROOT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const IS_PRODUCTION = process.argv.includes("--production") || process.env.NODE_ENV === "production";
@@ -12,8 +13,6 @@ const API_URL = "https://api.deepseek.com/chat/completions";
 const MODELS = new Set(["deepseek-v4-flash", "deepseek-v4-pro"]);
 const ALLOW_BYOK = process.env.ALLOW_BYOK === "true" || !IS_PRODUCTION;
 const SERVER_API_KEY = process.env.DEEPSEEK_API_KEY || "";
-const MAX_HISTORY_TURNS = 24;
-const MAX_MESSAGE_LENGTH = 8_000;
 const REQUEST_TIMEOUT_MS = 90_000;
 const RATE_LIMIT_WINDOW_MS = 10 * 60_000;
 const parsedRateLimit = Number(process.env.RATE_LIMIT_MAX || 30);
@@ -124,23 +123,6 @@ app.get("/api/config", (_request, response) => {
     models: [...MODELS],
   });
 });
-
-function normalizeMessages(input) {
-  if (!Array.isArray(input)) return [];
-  return input
-    .slice(-MAX_HISTORY_TURNS)
-    .filter(
-      (message) =>
-        message &&
-        (message.role === "user" || message.role === "assistant") &&
-        typeof message.content === "string",
-    )
-    .map((message) => ({
-      role: message.role,
-      content: message.content.trim().slice(0, MAX_MESSAGE_LENGTH),
-    }))
-    .filter((message) => message.content.length > 0);
-}
 
 function providerStatusMessage(status, requestedMode) {
   if (status === 401) {
@@ -267,7 +249,11 @@ app.post("/api/chat", rateLimit, express.json({ limit: "768kb" }), limitConcurre
     return response.status(400).json({ error: "不支持的模型" });
   }
 
-  const messages = normalizeMessages(request.body?.messages);
+  const outputFormat = request.body?.outputFormat ?? "json_object";
+  if (outputFormat !== "json_object" && outputFormat !== "text") {
+    return response.status(400).json({ error: "回复格式无效" });
+  }
+  const messages = normalizeChatMessages(request.body?.messages);
   if (!messages.length || messages.at(-1)?.role !== "user") {
     return response.status(400).json({ error: "缺少有效的玩家消息" });
   }
@@ -291,15 +277,13 @@ app.post("/api/chat", rateLimit, express.json({ limit: "768kb" }), limitConcurre
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
+      body: JSON.stringify(createDeepSeekBody({
         model,
-        messages: [{ role: "system", content: SYSTEM_PROMPT }, ...messages],
-        thinking: { type: "disabled" },
-        response_format: { type: "json_object" },
-        stream: true,
-        max_tokens: 1_600,
-        user_id: `jingyu_${sessionId.replaceAll("-", "")}`,
-      }),
+        messages,
+        systemPrompt: SYSTEM_PROMPT,
+        sessionId,
+        outputFormat,
+      })),
       signal: controller.signal,
     });
 

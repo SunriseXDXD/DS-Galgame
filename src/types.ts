@@ -17,7 +17,15 @@ export const EMOTIONS = [
   "determined",
 ] as const;
 
+export const CHARACTER_ACTIONS = [
+  "bashful",
+  "cheer",
+  "explain",
+  "point",
+] as const;
+
 export type Emotion = (typeof EMOTIONS)[number];
+export type CharacterAction = (typeof CHARACTER_ACTIONS)[number];
 export type SegmentKind = "narration" | "dialogue" | "thought";
 export type ModelId = "deepseek-v4-flash" | "deepseek-v4-pro";
 export type ConnectionMode = "demo" | "byok" | "server";
@@ -26,6 +34,7 @@ export interface SceneSegment {
   kind: SegmentKind;
   text: string;
   mood?: Emotion;
+  action?: CharacterAction;
 }
 
 export interface AssistantScene {

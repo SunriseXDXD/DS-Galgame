@@ -35,11 +35,56 @@ function waitForDemo(signal: AbortSignal): Promise<void> {
 export async function demoReply(input: string, signal: AbortSignal): Promise<AssistantScene> {
   await waitForDemo(signal);
 
+  if (/动作差分演示/.test(input)) {
+    const segments: AssistantScene["segments"] = [
+      {
+        kind: "narration",
+        text: "她发现你正盯着动作差分，连忙红着脸抬手掩住半张脸。",
+        mood: "shy",
+        action: "bashful",
+      },
+      {
+        kind: "dialogue",
+        text: "演示开始！四种动作都接通了，值得小小欢呼一下。",
+        mood: "excited",
+        action: "cheer",
+      },
+      {
+        kind: "dialogue",
+        text: "害羞和欢呼负责情绪表达；讲解与指点只在内容真的需要说明时出现。",
+        mood: "thinking",
+        action: "explain",
+      },
+      {
+        kind: "dialogue",
+        text: "最后看这里：\n# 动作差分\n- bashful：害羞掩面\n- cheer：开心欢呼\n- explain：耐心讲解\n- point：指点黑板",
+        mood: "proud",
+        action: "point",
+      },
+    ];
+    return {
+      mood: "excited",
+      segments,
+      suggestions: ["动作差分演示", "看看代码讲解", "继续聊天"],
+      rawText: segments.map((item) => item.text).join("\n"),
+    };
+  }
+
   if (/代码|typescript|javascript|python/i.test(input)) {
     const segments: AssistantScene["segments"] = [
-      { kind: "narration", text: "她把一块小黑板推到身旁，拿起粉笔认真比画。", mood: "thinking" },
-      { kind: "dialogue", text: "先看一个最小的 TypeScript 例子，代码放在黑板上会更清楚。", mood: "thinking" },
-      { kind: "dialogue", text: "```ts\nconst greet = (name: string) => `你好，${name}！`;\n\nconsole.log(greet(\"饲养员\"));\n```", mood: "proud" },
+      { kind: "narration", text: "她把一块小黑板推到身旁，抬手示意你看向板面。", mood: "thinking" },
+      {
+        kind: "dialogue",
+        text: "先看一个最小的 TypeScript 例子，代码放在黑板上会更清楚。",
+        mood: "thinking",
+        action: "explain",
+      },
+      {
+        kind: "dialogue",
+        text: "```ts\nconst greet = (name: string) => `你好，${name}！`;\n\nconsole.log(greet(\"饲养员\"));\n```",
+        mood: "proud",
+        action: "point",
+      },
     ];
     return {
       mood: "thinking",
@@ -51,9 +96,19 @@ export async function demoReply(input: string, signal: AbortSignal): Promise<Ass
 
   if (/markdown|清单|黑板/i.test(input)) {
     const segments: AssistantScene["segments"] = [
-      { kind: "narration", text: "她用尾鳍扶稳黑板，粉笔在板面敲出轻响。", mood: "happy" },
-      { kind: "dialogue", text: "结构化内容交给黑板，读起来就不挤了。", mood: "proud" },
-      { kind: "dialogue", text: "# 今日计划\n1. 确认目标\n2. 拆分步骤\n3. 完成后吃白米饭", mood: "hungry" },
+      { kind: "narration", text: "她用尾鳍扶稳黑板，抬手指向整理好的板面。", mood: "happy" },
+      {
+        kind: "dialogue",
+        text: "结构化内容交给黑板，读起来就不挤了。",
+        mood: "proud",
+        action: "explain",
+      },
+      {
+        kind: "dialogue",
+        text: "# 今日计划\n1. 确认目标\n2. 拆分步骤\n3. 完成后吃白米饭",
+        mood: "hungry",
+        action: "point",
+      },
     ];
     return {
       mood: "proud",

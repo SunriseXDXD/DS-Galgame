@@ -13,6 +13,7 @@ interface DialogueBoxProps {
   typeSpeed: number;
   autoPlay: boolean;
   interactionEnabled: boolean;
+  onSpeakingChange?: (speaking: boolean) => void;
   onAutoPlayChange: (enabled: boolean) => void;
   onAdvance: () => void;
   onSubmit: (message: string) => void;
@@ -37,6 +38,7 @@ export function DialogueBox({
   typeSpeed,
   autoPlay,
   interactionEnabled,
+  onSpeakingChange,
   onAutoPlayChange,
   onAdvance,
   onSubmit,
@@ -54,6 +56,12 @@ export function DialogueBox({
     () => glyphs.slice(0, visibleLength).join(""),
     [glyphs, visibleLength],
   );
+  const speaking = interactionEnabled && !waiting && !complete && Boolean(fullText);
+
+  useLayoutEffect(() => {
+    onSpeakingChange?.(speaking);
+    return () => onSpeakingChange?.(false);
+  }, [onSpeakingChange, speaking]);
 
   useLayoutEffect(() => {
     setVisibleLength(0);

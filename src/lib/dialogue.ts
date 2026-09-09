@@ -1,6 +1,8 @@
 import {
+  CHARACTER_ACTIONS,
   EMOTIONS,
   type AssistantScene,
+  type CharacterAction,
   type DialoguePage,
   type Emotion,
   type SceneSegment,
@@ -11,6 +13,7 @@ import { inferEmotion } from "./emotions";
 
 const VALID_KINDS = new Set<SegmentKind>(["narration", "dialogue", "thought"]);
 const VALID_MOODS = new Set<string>(EMOTIONS);
+const VALID_ACTIONS = new Set<string>(CHARACTER_ACTIONS);
 const SENTENCE_END = new Set(["。", "！", "？", "!", "?", "；", ";", "…"]);
 const SOFT_BREAK = new Set(["，", "、", "；", ";", " ", "\t"]);
 const EMPTY_RESPONSE_TEXT = "海缆里只剩下一串安静的气泡……再试一次吧。";
@@ -461,7 +464,15 @@ function normalizeSegments(payload: Record<string, unknown>): SceneSegment[] {
       ? (item.kind as SegmentKind)
       : "dialogue";
     const mood = VALID_MOODS.has(String(item.mood)) ? (item.mood as Emotion) : undefined;
-    result.push({ kind, text, ...(mood ? { mood } : {}) });
+    const action = typeof item.action === "string" && VALID_ACTIONS.has(item.action)
+      ? (item.action as CharacterAction)
+      : undefined;
+    result.push({
+      kind,
+      text,
+      ...(mood ? { mood } : {}),
+      ...(action ? { action } : {}),
+    });
   }
 
   if (result.length) return result;
@@ -623,6 +634,7 @@ export function sceneToPages(scene: AssistantScene): DialoguePage[] {
         kind: segment.kind,
         text,
         mood: segment.mood ?? (inferred === "neutral" ? scene.mood : inferred),
+        ...(segment.action ? { action: segment.action } : {}),
         ...(presentation.blackboard ? { blackboard: presentation.blackboard } : {}),
       };
     });

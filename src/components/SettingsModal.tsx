@@ -23,11 +23,13 @@ interface SettingsModalProps {
   mode: ConnectionMode;
   model: ModelId;
   apiKey: string;
+  rememberApiKey: boolean;
   typeSpeed: number;
   serverConfig: PublicServerConfig;
   configReady: boolean;
   onClose: () => void;
-  onSaveConnection: (mode: ConnectionMode, key: string, model: ModelId) => void;
+  onSaveConnection: (mode: ConnectionMode, key: string, model: ModelId, rememberApiKey: boolean) => void;
+  onForgetApiKey: () => boolean;
   onTypeSpeedChange: (speed: number) => void;
 }
 
@@ -36,48 +38,71 @@ export function SettingsModal({
   mode,
   model,
   apiKey,
+  rememberApiKey,
   typeSpeed,
   serverConfig,
   configReady,
   onClose,
   onSaveConnection,
+  onForgetApiKey,
   onTypeSpeedChange,
 }: SettingsModalProps) {
   const [tab, setTab] = useState<SettingsTab>("connect");
   const [draftMode, setDraftMode] = useState<ConnectionMode>(mode);
   const [draftKey, setDraftKey] = useState(apiKey);
+  const [draftRememberApiKey, setDraftRememberApiKey] = useState(rememberApiKey);
   const [draftModel, setDraftModel] = useState<ModelId>(model);
   const [showKey, setShowKey] = useState(false);
   const [error, setError] = useState("");
+  const [externalConnectionChanged, setExternalConnectionChanged] = useState(false);
   const dialogRef = useRef<HTMLElement>(null);
+  const connectionDraftDirtyRef = useRef(false);
+  const externalConnectionRef = useRef({ apiKey, mode, model, rememberApiKey });
+
+  const markConnectionDraftDirty = () => {
+    connectionDraftDirtyRef.current = true;
+  };
 
   useFocusTrap(dialogRef, onClose, open);
 
   useEffect(() => {
     if (!open) return;
+    const previous = externalConnectionRef.current;
+    const connectionChanged = previous.apiKey !== apiKey ||
+      previous.mode !== mode ||
+      previous.model !== model ||
+      previous.rememberApiKey !== rememberApiKey;
+    if (!connectionChanged) return;
+    externalConnectionRef.current = { apiKey, mode, model, rememberApiKey };
+    if (connectionDraftDirtyRef.current) {
+      setExternalConnectionChanged(true);
+      return;
+    }
     setDraftMode(mode);
     setDraftKey(apiKey);
+    setDraftRememberApiKey(rememberApiKey);
     setDraftModel(model);
     setShowKey(false);
     setError("");
-  }, [apiKey, mode, model, open]);
+    setExternalConnectionChanged(false);
+  }, [apiKey, mode, model, open, rememberApiKey]);
 
   useEffect(() => {
     if (!open) return;
     if (!configReady && draftMode !== "demo") {
       setDraftMode("demo");
-      setDraftKey("");
+      if (!draftRememberApiKey) setDraftKey("");
       setShowKey(false);
       return;
     }
     if (draftMode === "byok" && !serverConfig.byokAllowed) {
       setDraftMode(serverConfig.serverKeyConfigured ? "server" : "demo");
-      setDraftKey("");
+      if (!draftRememberApiKey) setDraftKey("");
       setShowKey(false);
     } else if (draftMode === "server" && !serverConfig.serverKeyConfigured) {
       setDraftMode(serverConfig.byokAllowed ? "byok" : "demo");
     }
-  }, [configReady, draftMode, open, serverConfig.byokAllowed, serverConfig.serverKeyConfigured]);
+  }, [configReady, draftMode, draftRememberApiKey, open, serverConfig.byokAllowed, serverConfig.serverKeyConfigured]);
 
   if (!open) return null;
 
@@ -99,15 +124,36 @@ export function SettingsModal({
       setError("服务端尚未配置 API Key");
       return;
     }
-    if (draftMode === "byok") {
+    if (draftMode === "byok" || draftRememberApiKey) {
       const validationError = validateByokApiKey(trimmedKey);
       if (validationError) {
         setError(validationError);
         return;
       }
     }
-    onSaveConnection(draftMode, trimmedKey, draftModel);
+    onSaveConnection(draftMode, trimmedKey, draftModel, draftRememberApiKey);
     onClose();
+  };
+
+  const forgetApiKey = () => {
+    const removed = onForgetApiKey();
+    const nextMode = draftMode === "byok" ? "demo" : draftMode;
+    const nextKey = removed ? "" : apiKey;
+    const nextRememberApiKey = !removed && rememberApiKey;
+    const nextExternalMode = mode === "byok" ? "demo" : mode;
+    externalConnectionRef.current = {
+      apiKey: nextKey,
+      mode: nextExternalMode,
+      model,
+      rememberApiKey: nextRememberApiKey,
+    };
+    connectionDraftDirtyRef.current = nextMode !== nextExternalMode || draftModel !== model;
+    setDraftMode(nextMode);
+    setDraftKey(nextKey);
+    setDraftRememberApiKey(nextRememberApiKey);
+    setShowKey(false);
+    setError(removed ? "" : "无法确认删除，旧 Key 可能仍保存在本地；请清理浏览器站点数据");
+    setExternalConnectionChanged(false);
   };
 
   return (
@@ -132,7 +178,7 @@ export function SettingsModal({
           {tab === "connect" && (
             <div className="settings-panel">
               <div className="mode-cards">
-                <button type="button" aria-pressed={draftMode === "demo"} className={draftMode === "demo" ? "mode-card is-active" : "mode-card"} onClick={() => { setDraftMode("demo"); setDraftKey(""); setShowKey(false); }}>
+                <button type="button" aria-pressed={draftMode === "demo"} className={draftMode === "demo" ? "mode-card is-active" : "mode-card"} onClick={() => { if (draftMode !== "demo") markConnectionDraftDirty(); setDraftMode("demo"); if (!draftRememberApiKey) setDraftKey(""); setShowKey(false); }}>
                   <Sparkles size={19} />
                   <span><strong>演示模式</strong><small>无需 Key，体验预设分镜</small></span>
                   {draftMode === "demo" && <Check size={17} />}
@@ -141,7 +187,12 @@ export function SettingsModal({
                   type="button"
                   aria-pressed={draftMode === "byok"}
                   className={draftMode === "byok" ? "mode-card is-active" : "mode-card"}
-                  onClick={() => serverConfig.byokAllowed && configReady && setDraftMode("byok")}
+                  onClick={() => {
+                    if (serverConfig.byokAllowed && configReady) {
+                      if (draftMode !== "byok") markConnectionDraftDirty();
+                      setDraftMode("byok");
+                    }
+                  }}
                   disabled={!configReady || !serverConfig.byokAllowed}
                 >
                   <KeyRound size={19} />
@@ -152,7 +203,7 @@ export function SettingsModal({
                   type="button"
                   aria-pressed={draftMode === "server"}
                   className={draftMode === "server" ? "mode-card is-active" : "mode-card"}
-                  onClick={() => { if (serverConfig.serverKeyConfigured && configReady) { setDraftMode("server"); setDraftKey(""); setShowKey(false); } }}
+                  onClick={() => { if (serverConfig.serverKeyConfigured && configReady) { if (draftMode !== "server") markConnectionDraftDirty(); setDraftMode("server"); if (!draftRememberApiKey) setDraftKey(""); setShowKey(false); } }}
                   disabled={!configReady || !serverConfig.serverKeyConfigured}
                 >
                   <Server size={19} />
@@ -162,37 +213,91 @@ export function SettingsModal({
               </div>
 
               {draftMode === "byok" && (
-                <label className="field-label">
-                  <span>DeepSeek API Key</span>
-                  <div className="secret-input">
-                    <LockKeyhole size={17} />
-                    <input
-                      autoFocus
-                      type={showKey ? "text" : "password"}
-                      value={draftKey}
-                      maxLength={512}
-                      autoComplete="off"
-                      spellCheck={false}
-                      placeholder="sk-••••••••••••••••"
-                      onChange={(event) => {
-                        setDraftKey(event.target.value);
+                <>
+                  <label className="field-label">
+                    <span>DeepSeek API Key</span>
+                    <div className="secret-input">
+                      <LockKeyhole size={17} />
+                      <input
+                        autoFocus
+                        type={showKey ? "text" : "password"}
+                        value={draftKey}
+                        maxLength={512}
+                        autoComplete="off"
+                        spellCheck={false}
+                        placeholder="sk-••••••••••••••••"
+                        onChange={(event) => {
+                          markConnectionDraftDirty();
+                          setDraftKey(event.target.value);
+                          setError("");
+                        }}
+                      />
+                      <button type="button" onClick={() => setShowKey(!showKey)} aria-label={showKey ? "隐藏密钥" : "显示密钥"}>
+                        {showKey ? <EyeOff size={17} /> : <Eye size={17} />}
+                      </button>
+                    </div>
+                    <small className="privacy-note">
+                      此输入框中的 Key 默认仅存在本页内存中，不会被应用主动加入对话记录；部署方仍须对代理与 APM 日志脱敏。
+                    </small>
+                  </label>
+                  <div className="key-persistence">
+                    <label className="key-persistence__toggle">
+                      <input
+                        type="checkbox"
+                        checked={draftRememberApiKey}
+                        onChange={(event) => {
+                          markConnectionDraftDirty();
+                          setDraftRememberApiKey(event.target.checked);
+                          setError("");
+                        }}
+                      />
+                      <span>
+                        <strong>记住到这台设备</strong>
+                        <small>会以明文写入 localStorage，同源脚本可以读取；仅限个人设备使用。取消勾选并保存后将删除本地副本。</small>
+                      </span>
+                    </label>
+                    {rememberApiKey && (
+                      <button type="button" className="forget-key-button" onClick={forgetApiKey}>一键忘记</button>
+                    )}
+                  </div>
+                </>
+              )}
+
+              {draftMode !== "byok" && (rememberApiKey || draftRememberApiKey) && (
+                <div className="remembered-key-note">
+                  <span>
+                    {draftRememberApiKey
+                      ? rememberApiKey
+                        ? draftKey.trim() === apiKey.trim()
+                          ? "保存设置后会继续在这台设备记住 BYOK Key；切换连接模式不会删除它。"
+                          : "保存设置后会用刚输入的 Key 更新这台设备上的本地副本。"
+                        : "保存设置后会以明文在这台设备记住刚输入的 BYOK Key。"
+                      : "保存设置后会删除这台设备上已有的 BYOK Key。"}
+                  </span>
+                  {rememberApiKey && draftRememberApiKey ? (
+                    <button type="button" className="forget-key-button" onClick={forgetApiKey}>一键忘记</button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="forget-key-button"
+                      onClick={() => {
+                        markConnectionDraftDirty();
+                        const keepKey = !draftRememberApiKey;
+                        setDraftRememberApiKey(keepKey);
+                        setDraftKey(keepKey ? apiKey : "");
                         setError("");
                       }}
-                    />
-                    <button type="button" onClick={() => setShowKey(!showKey)} aria-label={showKey ? "隐藏密钥" : "显示密钥"}>
-                      {showKey ? <EyeOff size={17} /> : <Eye size={17} />}
+                    >
+                      {draftRememberApiKey ? "取消记住" : "继续保留"}
                     </button>
-                  </div>
-                  <small className="privacy-note">
-                    Key 仅存在本页内存中，刷新即清除。本应用不会主动记录；部署方仍须擦除代理与 APM 中的敏感请求头。
-                  </small>
-                </label>
+                  )}
+                </div>
               )}
 
               {draftMode !== "demo" && (
                 <label className="field-label">
                   <span>模型</span>
-                  <select value={draftModel} onChange={(event) => setDraftModel(event.target.value as ModelId)}>
+                  <select value={draftModel} onChange={(event) => { markConnectionDraftDirty(); setDraftModel(event.target.value as ModelId); }}>
                     {serverConfig.models.map((modelId) => (
                       <option key={modelId} value={modelId}>
                         {modelId === "deepseek-v4-flash" ? "DeepSeek V4 Flash · 推荐" : "DeepSeek V4 Pro · 更强"}
@@ -215,6 +320,11 @@ export function SettingsModal({
                 />
               </div>
 
+              {externalConnectionChanged && (
+                <p className="form-error" role="status">
+                  另一标签页更新了连接凭据；本页未保存的草稿已保留，保存将以本页内容为准，关闭设置则放弃草稿。
+                </p>
+              )}
               {error && <p className="form-error" role="alert">{error}</p>}
               <div className="settings-actions">
                 <a href="https://api-docs.deepseek.com/zh-cn/" target="_blank" rel="noreferrer">

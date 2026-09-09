@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { CHARACTER_ACTIONS } from "../types";
 import { paginateText, parseScenePayload, sceneToPages, splitGraphemes } from "./dialogue";
 import { inferEmotion } from "./emotions";
 
@@ -16,6 +17,29 @@ describe("parseScenePayload", () => {
     expect(scene.mood).toBe("hungry");
     expect(scene.segments).toHaveLength(2);
     expect(scene.suggestions).toEqual(["给你加饭", "先回答问题"]);
+    expect(scene.segments.every((segment) => segment.action === undefined)).toBe(true);
+  });
+
+  it("allowlists character actions without exposing invalid action objects", () => {
+    expect(CHARACTER_ACTIONS).toEqual(["bashful", "cheer", "explain", "point"]);
+    const scene = parseScenePayload(JSON.stringify({
+      mood: "thinking",
+      segments: [
+        { kind: "dialogue", text: "本鲸鱼慢慢讲。", action: "explain" },
+        { kind: "dialogue", text: "这一句没有动作。", action: "dance" },
+        { kind: "dialogue", text: "对象也不能溜进正文。", action: { debug: "hidden" } },
+      ],
+      suggestions: [],
+    }));
+
+    expect(scene.segments).toEqual([
+      { kind: "dialogue", text: "本鲸鱼慢慢讲。", action: "explain" },
+      { kind: "dialogue", text: "这一句没有动作。" },
+      { kind: "dialogue", text: "对象也不能溜进正文。" },
+    ]);
+    expect(scene.rawText).toBe("本鲸鱼慢慢讲。\n这一句没有动作。\n对象也不能溜进正文。");
+    expect(scene.rawText).not.toContain("debug");
+    expect(scene.rawText).not.toContain("dance");
   });
 
   it("recovers from fenced or unstructured output", () => {
@@ -372,6 +396,19 @@ describe("visual novel pagination", () => {
   it("preserves segment kinds", () => {
     const scene = parseScenePayload('{"mood":"shy","segments":[{"kind":"thought","text":"才、才没有高兴。"}]}');
     expect(sceneToPages(scene)[0].kind).toBe("thought");
+  });
+
+  it("preserves an explicit action on every page created from its segment", () => {
+    const text = "请看黑板上的这一处重点。".repeat(10);
+    const scene = parseScenePayload(JSON.stringify({
+      mood: "thinking",
+      segments: [{ kind: "dialogue", text, action: "point" }],
+    }));
+    const pages = sceneToPages(scene);
+
+    expect(pages.length).toBeGreaterThan(1);
+    expect(pages.map((page) => page.text).join("")).toBe(text);
+    expect(pages.every((page) => page.action === "point")).toBe(true);
   });
 
   it("can infer a more specific mood for the current page", () => {

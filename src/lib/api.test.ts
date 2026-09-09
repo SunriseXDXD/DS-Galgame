@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { streamDeepSeek } from "./api";
+import { ApiEmptyResponseError, streamDeepSeek } from "./api";
 import type { ChatTurn } from "../types";
 
 const sessionId = "123e4567-e89b-42d3-a456-426614174000";
@@ -26,20 +26,22 @@ function streamResponse(chunks: string[], status = 200): Response {
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
 describe("streamDeepSeek", () => {
   it("parses SSE across arbitrary network chunk boundaries", async () => {
     const delta = vi.fn();
-    vi.stubGlobal("fetch", vi.fn(async () => streamResponse([
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => streamResponse([
       ": keep-alive\n\n",
       "data: {\"choices\":[{\"delta\":{\"con",
       "tent\":\"你好\"}}]}\n\n",
       "data: {\"choices\":[{\"delta\":{\"content\":\"，鲸鱼在。\"}}]}\n\n",
       "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
       "data: [DONE]\n\n",
-    ])));
+    ]));
+    vi.stubGlobal("fetch", fetchMock);
 
     const result = await streamDeepSeek({
       apiKey: "  sk-test  ",
@@ -59,6 +61,136 @@ describe("streamDeepSeek", () => {
         "X-DeepSeek-API-Key": "sk-test",
       }),
     }));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const requestBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as Record<string, unknown>;
+    expect(requestBody).not.toHaveProperty("outputFormat");
+  });
+
+  it("retries one empty structured response as text with the same request context", async () => {
+    const delta = vi.fn();
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => streamResponse([]))
+      .mockResolvedValueOnce(streamResponse([
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"私密推理\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"  \"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+      ]))
+      .mockResolvedValueOnce(streamResponse([
+        "data: {\"choices\":[{\"delta\":{\"content\":\"恢复正文\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+      ]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(streamDeepSeek({
+      apiKey: "sk-test",
+      authMode: "byok",
+      sessionId,
+      model: "deepseek-v4-flash",
+      messages,
+      signal: new AbortController().signal,
+      onDelta: delta,
+    })).resolves.toBe("恢复正文");
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const firstRequest = fetchMock.mock.calls[0]?.[1];
+    const retryRequest = fetchMock.mock.calls[1]?.[1];
+    const firstBody = JSON.parse(String(firstRequest?.body)) as Record<string, unknown>;
+    const retryBody = JSON.parse(String(retryRequest?.body)) as Record<string, unknown>;
+    expect(firstBody).not.toHaveProperty("outputFormat");
+    expect(retryBody).toMatchObject({ outputFormat: "text" });
+    expect(retryBody.messages).toEqual(firstBody.messages);
+    expect(retryRequest?.headers).toEqual(firstRequest?.headers);
+    expect(retryRequest?.signal).toBe(firstRequest?.signal);
+    expect(delta).toHaveBeenCalledWith("");
+    expect(delta).toHaveBeenLastCalledWith("恢复正文");
+    expect(warning).toHaveBeenCalledWith("DeepSeek empty response", {
+      attempt: "structured",
+      frameCount: 3,
+      contentCharacters: 2,
+      reasoningCharacters: 4,
+      finishReason: "stop",
+      done: true,
+    });
+    const logged = JSON.stringify(warning.mock.calls);
+    expect(logged).not.toContain("私密推理");
+    expect(logged).not.toContain("sk-test");
+    expect(logged).not.toContain("你好");
+  });
+
+  it("throws a typed friendly error when the single text retry is also empty", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(streamResponse([
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+      ]))
+      .mockResolvedValueOnce(streamResponse([
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"不得泄露的推理\"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\" \"}}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+      ]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    let caught: unknown;
+    try {
+      await streamDeepSeek({
+        apiKey: "",
+        authMode: "server",
+        sessionId,
+        model: "deepseek-v4-flash",
+        messages,
+        signal: new AbortController().signal,
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(ApiEmptyResponseError);
+    expect(caught).toMatchObject({
+      name: "ApiEmptyResponseError",
+      message: "上游返回空回复",
+      stats: {
+        frameCount: 3,
+        contentCharacters: 1,
+        reasoningCharacters: 7,
+        finishReason: "stop",
+        done: true,
+      },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(warning).toHaveBeenCalledTimes(2);
+    const logged = JSON.stringify(warning.mock.calls);
+    expect(logged).not.toContain("不得泄露的推理");
+    expect(logged).not.toContain("choices");
+  });
+
+  it("does not retry an empty response after its signal is canceled", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const controller = new AbortController();
+    const delta = vi.fn();
+    const fetchMock = vi.fn(async () => {
+      controller.abort("user");
+      return streamResponse([
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+      ]);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(streamDeepSeek({
+      apiKey: "",
+      authMode: "server",
+      sessionId,
+      model: "deepseek-v4-flash",
+      messages,
+      signal: controller.signal,
+      onDelta: delta,
+    })).rejects.toBeInstanceOf(ApiEmptyResponseError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(delta).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -82,10 +214,11 @@ describe("streamDeepSeek", () => {
   });
 
   it("surfaces JSON proxy errors", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+    const fetchMock = vi.fn(async () => new Response(
       JSON.stringify({ error: "API Key 无效" }),
       { status: 401, headers: { "Content-Type": "application/json" } },
-    )));
+    ));
+    vi.stubGlobal("fetch", fetchMock);
 
     await expect(streamDeepSeek({
       apiKey: "sk-bad",
@@ -95,6 +228,7 @@ describe("streamDeepSeek", () => {
       messages,
       signal: new AbortController().signal,
     })).rejects.toThrow("API Key 无效");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("does not expose non-JSON upstream bodies as dialogue errors", async () => {
@@ -130,10 +264,11 @@ describe("streamDeepSeek", () => {
   });
 
   it("rejects truncated streams even when partial content arrived", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => streamResponse([
+    const fetchMock = vi.fn(async () => streamResponse([
       "data: {\"choices\":[{\"delta\":{\"content\":\"半截 JSON\"},\"finish_reason\":\"length\"}]}\n\n",
       "data: [DONE]\n\n",
-    ])));
+    ]));
+    vi.stubGlobal("fetch", fetchMock);
 
     await expect(streamDeepSeek({
       apiKey: "",
@@ -143,6 +278,7 @@ describe("streamDeepSeek", () => {
       messages,
       signal: new AbortController().signal,
     })).rejects.toThrow("长度上限");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("rejects a connection that closes without DONE", async () => {

@@ -16,7 +16,13 @@ import { DialogueBox } from "./components/DialogueBox";
 import { HistoryDrawer } from "./components/HistoryDrawer";
 import { IconButton } from "./components/IconButton";
 import { SettingsModal } from "./components/SettingsModal";
-import { ApiTimeoutError, streamDeepSeek } from "./lib/api";
+import { ApiEmptyResponseError, ApiTimeoutError, streamDeepSeek } from "./lib/api";
+import {
+  API_KEY_STORAGE_KEY,
+  clearStoredApiKey,
+  loadStoredApiKey,
+  updateStoredApiKey,
+} from "./lib/apiKeyStorage";
 import { demoReply } from "./lib/demo";
 import { parseScenePayload, sceneToPages } from "./lib/dialogue";
 import { EMOTIONS } from "./types";
@@ -97,26 +103,32 @@ function newTurn(role: ChatTurn["role"], content: string, mood?: ChatTurn["mood"
   };
 }
 
-function errorScene(message: string, timedOut = false): AssistantScene {
+function errorScene(message: string, timedOut = false, emptyResponse = false): AssistantScene {
   const line = timedOut
     ? "海缆好像打了个盹。不是本鲸鱼偷懒——至少这次不是。请稍后再试。"
-    : `连接没有成功：${message}。检查一下设置，我们再试一次。`;
+    : emptyResponse
+      ? "DeepSeek 已响应，但两次都没有返回正文。请稍后重试，或在设置中切换模型。"
+      : `这次回复没有完成：${message}。可以再试一次，或检查连接设置。`;
   return {
     mood: timedOut ? "sleepy" : "sad",
     segments: [
       { kind: "narration", text: timedOut ? "远处的信号灯熄灭了一瞬。" : "数据流忽然散成了细碎的气泡。" },
       { kind: "dialogue", text: line },
     ],
-    suggestions: ["打开连接设置", "再试一次", "切到演示模式"],
+    suggestions: emptyResponse
+      ? ["再试一次", "打开连接设置", "切到演示模式"]
+      : ["打开连接设置", "再试一次", "切到演示模式"],
     rawText: line,
   };
 }
 
 export default function App() {
+  const [initialStoredApiKey] = useState<string | null>(() => loadStoredApiKey());
   const [serverConfig, setServerConfig] = useState(DEFAULT_SERVER_CONFIG);
   const [configReady, setConfigReady] = useState(false);
   const [connectionMode, setConnectionMode] = useState<ConnectionMode>("demo");
-  const [apiKey, setApiKey] = useState("");
+  const [apiKey, setApiKey] = useState(initialStoredApiKey ?? "");
+  const [storedApiKey, setStoredApiKey] = useState(initialStoredApiKey);
   const [model, setModel] = useState<ModelId>(loadModel);
   const [history, setHistory] = useState<ChatTurn[]>(loadHistory);
   const [scene, setScene] = useState<AssistantScene>(WELCOME_SCENE);
@@ -128,6 +140,7 @@ export default function App() {
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [autoPlay, setAutoPlay] = useState(false);
   const [typeSpeed, setTypeSpeed] = useState(20);
+  const [characterSpeaking, setCharacterSpeaking] = useState(false);
   const [apiVerified, setApiVerified] = useState(false);
   const [toast, setToast] = useState("");
   const abortRef = useRef<AbortController | null>(null);
@@ -147,6 +160,7 @@ export default function App() {
   }, [pageIndex, pages, waiting]);
   const stageMood = waiting ? "thinking" : activePage?.mood ?? scene.mood;
   const overlayOpen = settingsOpen || historyOpen;
+  const apiKeyRemembered = storedApiKey !== null;
 
   const openSettings = useCallback(() => {
     setHistoryOpen(false);
@@ -174,7 +188,6 @@ export default function App() {
         if (safeConfig.models.length) {
           setModel((current) => safeConfig.models.includes(current) ? current : safeConfig.models[0]);
         }
-        if (!safeConfig.byokAllowed) setApiKey("");
         setConnectionMode((current) => {
           if (current === "byok" && !safeConfig.byokAllowed) {
             return safeConfig.serverKeyConfigured ? "server" : "demo";
@@ -182,7 +195,10 @@ export default function App() {
           if (current === "server" && !safeConfig.serverKeyConfigured) {
             return safeConfig.byokAllowed ? "byok" : "demo";
           }
-          if (!connectionTouchedRef.current && safeConfig.serverKeyConfigured) return "server";
+          if (!connectionTouchedRef.current) {
+            if (safeConfig.serverKeyConfigured) return "server";
+            if (safeConfig.byokAllowed && initialStoredApiKey) return "byok";
+          }
           return current;
         });
         setConfigReady(true);
@@ -190,12 +206,34 @@ export default function App() {
       .catch(() => {
         if (controller.signal.aborted) return;
         setServerConfig(DEFAULT_SERVER_CONFIG);
-        setApiKey("");
         setConnectionMode("demo");
         setConfigReady(true);
       });
     return () => controller.abort();
   }, []);
+
+  useEffect(() => {
+    const syncStoredApiKey = (event: StorageEvent) => {
+      if (event.key !== null && event.key !== API_KEY_STORAGE_KEY) return;
+      if (event.key === null && !apiKeyRemembered) return;
+      const nextStoredApiKey = loadStoredApiKey();
+      if (connectionMode === "byok") {
+        abortRef.current?.abort("configuration");
+        setApiVerified(false);
+      }
+      connectionTouchedRef.current = true;
+      setStoredApiKey(nextStoredApiKey);
+      setApiKey(nextStoredApiKey ?? "");
+      if (nextStoredApiKey === null) {
+        setConnectionMode((current) => current === "byok" ? "demo" : current);
+        setToast("已同步另一标签页的本地 Key 清除操作");
+      } else {
+        setToast("已同步另一标签页更新的 API Key");
+      }
+    };
+    window.addEventListener("storage", syncStoredApiKey);
+    return () => window.removeEventListener("storage", syncStoredApiKey);
+  }, [apiKeyRemembered, connectionMode]);
 
   useEffect(() => {
     try {
@@ -272,7 +310,7 @@ export default function App() {
     if (/切到演示模式/.test(trimmed)) {
       connectionTouchedRef.current = true;
       setConnectionMode("demo");
-      setApiKey("");
+      if (!apiKeyRemembered) setApiKey("");
       setApiVerified(false);
       setToast("已切换到演示模式");
       return;
@@ -331,16 +369,17 @@ export default function App() {
       setHistory((current) => current.filter((turn) => turn.id !== userTurn.id));
       const messageText = error instanceof Error ? error.message : "未知错误";
       const timedOut = error instanceof ApiTimeoutError || (abortedByClient && cancelReason === "timeout");
-      const nextScene = errorScene(messageText, timedOut);
+      const emptyResponse = error instanceof ApiEmptyResponseError;
+      const nextScene = errorScene(messageText, timedOut, emptyResponse);
       showScene(nextScene);
-      setApiVerified(false);
+      if (!emptyResponse) setApiVerified(false);
     } finally {
       window.clearTimeout(clientTimeout);
       if (abortRef.current === controller) abortRef.current = null;
       setWaiting(false);
       setStreamLength(0);
     }
-  }, [apiKey, configReady, connectionMode, history, model, openSettings, serverConfig.byokAllowed, serverConfig.serverKeyConfigured, sessionId, showScene, waiting]);
+  }, [apiKey, apiKeyRemembered, configReady, connectionMode, history, model, openSettings, serverConfig.byokAllowed, serverConfig.serverKeyConfigured, sessionId, showScene, waiting]);
 
   const handleChoice = (choice: string) => {
     if (/接入 API|打开连接设置/.test(choice)) {
@@ -424,7 +463,15 @@ export default function App() {
           <span>H · 对话回想</span>
         </div>
 
-        <CharacterStage mood={stageMood} busy={waiting} />
+        <CharacterStage
+          mood={stageMood}
+          busy={waiting}
+          page={activePage}
+          speaking={characterSpeaking}
+          interactionEnabled={!overlayOpen}
+          typeSpeed={typeSpeed}
+          blackboard={activeBlackboard}
+        />
         <Blackboard content={activeBlackboard} />
 
         <DialogueBox
@@ -437,6 +484,7 @@ export default function App() {
           typeSpeed={typeSpeed}
           autoPlay={autoPlay}
           interactionEnabled={!overlayOpen}
+          onSpeakingChange={setCharacterSpeaking}
           onAutoPlayChange={setAutoPlay}
           onAdvance={() => setPageIndex((index) => Math.min(index + 1, pages.length - 1))}
           onSubmit={(message) => void sendMessage(message)}
@@ -458,18 +506,52 @@ export default function App() {
           mode={connectionMode}
           model={model}
           apiKey={apiKey}
+          rememberApiKey={apiKeyRemembered}
           typeSpeed={typeSpeed}
           serverConfig={serverConfig}
           configReady={configReady}
           onClose={() => setSettingsOpen(false)}
-          onSaveConnection={(nextMode, nextKey, nextModel) => {
+          onSaveConnection={(nextMode, nextKey, nextModel, shouldRememberApiKey) => {
             abortRef.current?.abort("configuration");
             connectionTouchedRef.current = true;
+            const storageUpdate = updateStoredApiKey(
+              nextKey,
+              shouldRememberApiKey,
+              storedApiKey,
+            );
+            const nextStoredApiKey = storageUpdate.persistedApiKey;
+            let storageNotice = "";
+            if (storageUpdate.status === "write_failed") {
+              storageNotice = storageUpdate.staleValueMayRemain
+                ? "新 Key 未写入，旧 Key 可能仍保存在本地；请一键忘记或清理站点数据"
+                : "连接已保存，但此浏览器无法记住 Key";
+            } else if (storageUpdate.status === "clear_failed") {
+              storageNotice = "无法确认删除，旧 Key 可能仍保存在本地；请清理浏览器站点数据";
+            }
+            const appliedKey = storageUpdate.staleValueMayRemain && nextStoredApiKey !== null
+              ? nextStoredApiKey
+              : nextKey;
             setConnectionMode(nextMode);
-            setApiKey(nextMode === "byok" ? nextKey : "");
+            setApiKey(nextMode === "byok" || nextStoredApiKey !== null ? appliedKey : "");
+            setStoredApiKey(nextStoredApiKey);
             setModel(nextModel);
             setApiVerified(false);
-            setToast(nextMode === "demo" ? "演示模式已就绪" : "连接配置已保存");
+            setToast(storageNotice || (nextMode === "demo" ? "演示模式已就绪" : "连接配置已保存"));
+          }}
+          onForgetApiKey={() => {
+            if (connectionMode === "byok") {
+              abortRef.current?.abort("configuration");
+              setConnectionMode("demo");
+              setApiVerified(false);
+            }
+            connectionTouchedRef.current = true;
+            const removed = clearStoredApiKey();
+            setApiKey(removed ? "" : storedApiKey ?? "");
+            if (removed) setStoredApiKey(null);
+            setToast(removed
+              ? "已从这台设备忘记 API Key"
+              : "无法确认删除，旧 Key 可能仍保存在本地；请清理浏览器站点数据");
+            return removed;
           }}
           onTypeSpeedChange={setTypeSpeed}
         />
