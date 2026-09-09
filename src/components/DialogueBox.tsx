@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { CornerDownLeft, LoaderCircle, Send, Square } from "lucide-react";
 import type { DialoguePage } from "../types";
 import { splitGraphemes } from "../lib/dialogue";
+import { createDialogueAdvanceGate, createDialogueProgress, revealDialogueProgress, visibleDialogueLength } from "../lib/dialoguePlayback";
 
 interface DialogueBoxProps {
   page?: DialoguePage;
@@ -21,6 +22,8 @@ interface DialogueBoxProps {
   onStop: () => void;
   onSound: (kind: "advance" | "send") => void;
 }
+
+const FALLBACK_CHOICES = ["举个例子", "换个话题"];
 
 function speakerFor(kind: DialoguePage["kind"] | undefined): string {
   if (kind === "narration") return "旁白";
@@ -46,12 +49,18 @@ export function DialogueBox({
   onStop,
   onSound,
 }: DialogueBoxProps) {
-  const [visibleLength, setVisibleLength] = useState(0);
+  const [progress, setProgress] = useState(() => createDialogueProgress(page));
+  const advanceGateRef = useRef(createDialogueAdvanceGate(page));
   const [draft, setDraft] = useState("");
   const fullText = page?.text ?? "";
   const glyphs = useMemo(() => splitGraphemes(fullText), [fullText]);
+  const visibleLength = visibleDialogueLength(progress, page, glyphs.length);
   const complete = visibleLength >= glyphs.length;
   const isLastPage = pageTotal === 0 || pageIndex >= pageTotal - 1;
+  const canReply = !waiting && complete && isLastPage;
+  // Empty model suggestions (including plain-text replies and old saves) must
+  // not remove the game's choice UI. These are local, user-initiated defaults.
+  const replyChoices = suggestions.length > 0 ? suggestions : FALLBACK_CHOICES;
   const visibleText = useMemo(
     () => glyphs.slice(0, visibleLength).join(""),
     [glyphs, visibleLength],
@@ -64,39 +73,42 @@ export function DialogueBox({
   }, [onSpeakingChange, speaking]);
 
   useLayoutEffect(() => {
-    setVisibleLength(0);
+    advanceGateRef.current.select(page);
+    setProgress(createDialogueProgress(page));
   }, [page]);
 
   useEffect(() => {
     if (!interactionEnabled || waiting || complete || !fullText) return;
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches || typeSpeed === 0) {
-      setVisibleLength(glyphs.length);
+      setProgress((current) => revealDialogueProgress(current, page, glyphs.length, true));
       return;
     }
     const timer = window.setTimeout(
-      () => setVisibleLength((length) => Math.min(length + 1, glyphs.length)),
+      () => setProgress((current) => revealDialogueProgress(current, page, glyphs.length)),
       typeSpeed,
     );
     return () => window.clearTimeout(timer);
-  }, [complete, fullText, glyphs.length, interactionEnabled, typeSpeed, visibleLength, waiting]);
+  }, [complete, fullText, glyphs.length, interactionEnabled, page, typeSpeed, visibleLength, waiting]);
+
+  const advancePage = useCallback((withSound: boolean) => {
+    if (!interactionEnabled || waiting) return;
+    if (!complete) {
+      setProgress((current) => revealDialogueProgress(current, page, glyphs.length, true));
+      return;
+    }
+    if (!isLastPage && advanceGateRef.current.request(page)) {
+      // AUTO and a manual click can arrive together: advance this page only once.
+      if (withSound) onSound("advance");
+      onAdvance();
+    }
+  }, [complete, glyphs.length, interactionEnabled, isLastPage, onAdvance, onSound, page, waiting]);
+  const advance = useCallback(() => advancePage(true), [advancePage]);
 
   useEffect(() => {
     if (!autoPlay || !interactionEnabled || waiting || !complete || isLastPage) return;
-    const timer = window.setTimeout(onAdvance, 1_650);
+    const timer = window.setTimeout(() => advancePage(false), 1_650);
     return () => window.clearTimeout(timer);
-  }, [autoPlay, complete, interactionEnabled, isLastPage, onAdvance, waiting]);
-
-  const advance = useCallback(() => {
-    if (waiting) return;
-    if (!complete) {
-      setVisibleLength(glyphs.length);
-      return;
-    }
-    if (!isLastPage) {
-      onSound("advance");
-      onAdvance();
-    }
-  }, [complete, glyphs.length, isLastPage, onAdvance, onSound, waiting]);
+  }, [advancePage, autoPlay, complete, interactionEnabled, isLastPage, page, waiting]);
 
   useEffect(() => {
     if (!interactionEnabled) return;
@@ -117,7 +129,7 @@ export function DialogueBox({
 
   const submit = () => {
     const message = draft.trim();
-    if (!message || waiting) return;
+    if (!message || !interactionEnabled || !canReply) return;
     onSound("send");
     onSubmit(message);
     setDraft("");
@@ -186,18 +198,18 @@ export function DialogueBox({
           </button>
         )}
 
-        {!waiting && complete && isLastPage && (
+        {canReply && (
           <div className="player-controls">
-            {suggestions.length > 0 && (
-              <div className="choice-list" aria-label="快捷回复">
-                {suggestions.map((suggestion, index) => (
-                  <button key={`${suggestion}-${index}`} type="button" onClick={() => onChoice(suggestion)}>
-                    <span>{String(index + 1).padStart(2, "0")}</span>
-                    {suggestion}
-                  </button>
-                ))}
-              </div>
-            )}
+            <div className="choice-list" aria-label="快捷回复">
+              {replyChoices.map((suggestion, index) => (
+                <button key={`${suggestion}-${index}`} type="button" onClick={() => {
+                  if (interactionEnabled && canReply) onChoice(suggestion);
+                }}>
+                  <span>{String(index + 1).padStart(2, "0")}</span>
+                  {suggestion}
+                </button>
+              ))}
+            </div>
             <div className="message-composer">
               <textarea
                 value={draft}

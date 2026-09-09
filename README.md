@@ -36,7 +36,7 @@ npm run dev
 ```bash
 npm run dev      # Vite + 本地 API 代理；前端支持热更新
 npm run build    # TypeScript 检查 + 生产构建
-npm test         # 分镜/SSE、API Key 存储、存档契约与安全边界测试
+npm test         # 分镜/SSE、打字与选项交互、API Key 存储、存档及安全边界测试
 npm start        # 运行 dist/ 生产服务
 ```
 
@@ -133,7 +133,9 @@ TIMEOUT_SIGNAL
 
 前端不会盲信格式：会剥离偶发的最外层 Markdown 围栏、校验分镜字段与枚举，并递归解开常见的 `choices[0].message.content` 等 API 包装。只有最终正文能进入文本框；结构化但无法恢复的对象会显示友好错误提示，不会把整个 dict、`choices`、`usage` 或 raw response 当成台词并写进回想。纯自然语言仍可降级为普通中文分段。
 
-分页按 Unicode 字素工作，会保留换行、空格和复合 emoji。每页按「显式 segment mood → 当前页文本推断 → 顶层 mood」决定差分，因此同一回答中的思考、惊讶、得意和放松会更及时地切换。SSE 解析器保留跨网络 chunk 的缓冲区、忽略 keep-alive 注释，并同时核验 `finish_reason: stop` 与 `[DONE]`，不会把截断回答当成完整分镜。
+分页按 Unicode 字素工作，会保留换行、空格和复合 emoji。每页按「显式 segment mood → 当前页文本推断 → 顶层 mood」决定差分，因此同一回答中的思考、惊讶、得意和放松会更及时地切换。打字进度与当前页绑定，旧页的定时回调不能推进新页；只有最后一页的全文显示完成后才出现下一轮选项与输入框。SSE 解析器保留跨网络 chunk 的缓冲区、忽略 keep-alive 注释，并同时核验 `finish_reason: stop` 与 `[DONE]`，不会把截断回答当成完整分镜。
+
+人设要求回答完成后提供 2–3 条快捷选项。若模型没有提供有效选项（空数组、缺失字段、被过滤的无效内容或纯文本降级），界面会在末页读完后显示本地通用选项「举个例子」「换个话题」，并保留自由输入框；旧存档同样适用。兜底只影响界面，不改写模型正文或存档，也不会自动发送消息。有有效模型选项时保持原选项，不用通用选项覆盖。
 
 ### 情绪之外的动作演出
 
@@ -194,7 +196,11 @@ TIMEOUT_SIGNAL
 
 ### 多轮请求与空回复恢复
 
-本地代理调用 `POST https://api.deepseek.com/chat/completions`，通过 `Authorization: Bearer …` 认证，使用 `thinking: { type: "disabled" }`、`stream: true`、`max_tokens: 1600`；首个请求的 `response_format` 为 `json_object`。字段约定见 [DeepSeek Chat Completions 文档](https://api-docs.deepseek.com/zh-cn/api/create-chat-completion/)。
+本地代理调用 `POST https://api.deepseek.com/chat/completions`，通过 `Authorization: Bearer …` 认证，使用 `thinking: { type: "disabled" }`、`stream: true`、`max_tokens: 4096`；首个请求的 `response_format` 为 `json_object`。预算统一定义在 `shared/chatRequest.mjs` 的 `DEEPSEEK_MAX_OUTPUT_TOKENS`，两个模型及空回复的文本格式重试使用相同上限。字段约定见 [DeepSeek Chat Completions 文档](https://api-docs.deepseek.com/zh-cn/api/create-chat-completion/)。
+
+这里的 tokens 包含 JSON 字段、对白、代码与公式，不等于汉字数。原来的 1600 对多步板书偏紧，4096 为本游戏的短篇分镜留出更多余量，是应用层的长度／延迟折中，不是每次必须生成这么长，也不能保证任意长教程一次完成。人设要求先完成本轮答案再给可选延伸，空间不足时压缩重复内容，而不是把剩余答案藏进下一轮选项。
+
+若上游返回 `finish_reason: length`，即使当前内容恰好是合法 JSON，也会显示专门的「达到长度上限」提示，不播放半份回答、不写入成功历史或覆盖剧情自动存档，也不把它误报为 Key 无效。截断不会自动重试以免重复消耗；可以自行缩小问题后发送，或手动重试。收到 `stop` 仅表示模型正常结束，不能证明内容语义上完整；模型自行讲到一半就给建议，与传输截断是不同情况。更新预算或人设后须重启 Node 服务。
 
 回想依然保存可读正文；发送前，由前后端共用的 `shared/chatRequest.mjs` 将 assistant 历史规范化为场景 JSON 字符串，使后续轮次的格式示范一致。已有的纯文本历史会自动适配，无需清除聊天；限长在序列化时处理，避免从中间截坏 JSON。用户消息仍保留原来的文本形式。
 

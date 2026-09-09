@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createDeepSeekBody, normalizeChatMessages } from "../../shared/chatRequest.mjs";
+import { createDeepSeekBody, DEEPSEEK_MAX_OUTPUT_TOKENS, normalizeChatMessages } from "../../shared/chatRequest.mjs";
 
 describe("normalizeChatMessages", () => {
   it("keeps an allowlisted scene and wraps legacy assistant text as scene JSON", () => {
@@ -293,7 +293,7 @@ describe("createDeepSeekBody", () => {
       thinking: { type: "disabled" },
       response_format: { type: "text" },
       stream: true,
-      max_tokens: 1_600,
+      max_tokens: 4_096,
       user_id: "jingyu_123e4567e89b42d3a456426614174000",
     });
     expect(JSON.stringify(body)).not.toContain("secret");
@@ -315,4 +315,23 @@ describe("createDeepSeekBody", () => {
       outputFormat: "xml" as "json_object",
     })).toThrow("outputFormat");
   });
+
+  it.each(["deepseek-v4-flash", "deepseek-v4-pro"])(
+    "reserves one bounded JSON-and-board output budget for %s and its text fallback",
+    (model) => {
+      for (const outputFormat of ["json_object", "text"] as const) {
+        const body = createDeepSeekBody({
+          model,
+          messages: [{ role: "user", content: "分步讲解公式，并在黑板展示代码。" }],
+          systemPrompt: "Return complete scene JSON.",
+          sessionId: "session-id",
+          outputFormat,
+        });
+
+        expect(body.max_tokens).toBe(DEEPSEEK_MAX_OUTPUT_TOKENS);
+        expect(body.max_tokens).toBe(4_096);
+        expect(body.thinking).toEqual({ type: "disabled" });
+      }
+    },
+  );
 });

@@ -19,7 +19,7 @@ import { IconButton } from "./components/IconButton";
 import { MemoryLibrary } from "./components/MemoryLibrary";
 import type { MemoryLibraryTab } from "./components/MemoryLibrary";
 import { SettingsModal } from "./components/SettingsModal";
-import { ApiEmptyResponseError, ApiTimeoutError, streamDeepSeek } from "./lib/api";
+import { ApiEmptyResponseError, ApiTimeoutError, ApiTruncatedResponseError, streamDeepSeek } from "./lib/api";
 import {
   API_KEY_STORAGE_KEY,
   clearStoredApiKey,
@@ -111,21 +111,25 @@ function newTurn(role: ChatTurn["role"], content: string, mood?: ChatTurn["mood"
   };
 }
 
-function errorScene(message: string, timedOut = false, emptyResponse = false): AssistantScene {
+function errorScene(message: string, timedOut = false, emptyResponse = false, truncatedResponse = false): AssistantScene {
   const line = timedOut
     ? "海缆好像打了个盹。不是本鲸鱼偷懒——至少这次不是。请稍后再试。"
     : emptyResponse
       ? "DeepSeek 已响应，但两次都没有返回正文。请稍后重试，或在设置中切换模型。"
-      : `这次回复没有完成：${message}。可以再试一次，或检查连接设置。`;
+      : truncatedResponse
+        ? "模型已响应，但这次回答达到长度上限，还没有完整生成。请把问题缩小到一个步骤后重试；这不表示 API Key 无效。"
+        : `这次回复没有完成：${message}。可以再试一次，或检查连接设置。`;
   return {
     mood: timedOut ? "sleepy" : "sad",
     segments: [
       { kind: "narration", text: timedOut ? "远处的信号灯熄灭了一瞬。" : "数据流忽然散成了细碎的气泡。" },
       { kind: "dialogue", text: line },
     ],
-    suggestions: emptyResponse
-      ? ["再试一次", "打开连接设置", "切到演示模式"]
-      : ["打开连接设置", "再试一次", "切到演示模式"],
+    suggestions: truncatedResponse
+      ? ["再试一次"]
+      : emptyResponse
+        ? ["再试一次", "打开连接设置", "切到演示模式"]
+        : ["打开连接设置", "再试一次", "切到演示模式"],
     rawText: line,
   };
 }
@@ -449,10 +453,11 @@ export default function App() {
       const messageText = error instanceof Error ? error.message : "未知错误";
       const timedOut = error instanceof ApiTimeoutError || (abortedByClient && cancelReason === "timeout");
       const emptyResponse = error instanceof ApiEmptyResponseError;
-      const nextScene = errorScene(messageText, timedOut, emptyResponse);
+      const truncatedResponse = error instanceof ApiTruncatedResponseError;
+      const nextScene = errorScene(messageText, timedOut, emptyResponse, truncatedResponse);
       setStoryReady(false);
       showScene(nextScene);
-      if (!emptyResponse) setApiVerified(false);
+      if (!emptyResponse && !truncatedResponse) setApiVerified(false);
     } finally {
       window.clearTimeout(clientTimeout);
       if (requestVersionRef.current === requestVersion) {

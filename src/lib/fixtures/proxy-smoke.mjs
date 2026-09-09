@@ -129,7 +129,7 @@ function checkOfficialBody(body, outputFormat, expectedRoles) {
   check(body.thinking?.type === "disabled", "upstream-thinking");
   check(body.response_format?.type === outputFormat, "upstream-output-format");
   check(body.stream === true, "upstream-stream");
-  check(body.max_tokens === 1_600, "upstream-max-tokens");
+  check(body.max_tokens === 4_096, "upstream-max-tokens");
   check(
     body.user_id === `jingyu_${SESSION_ID.replaceAll("-", "")}`,
     "upstream-user-id",

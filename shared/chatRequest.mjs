@@ -2,6 +2,10 @@ const MAX_MESSAGES = 24;
 const MAX_CONTENT_LENGTH = 8_000;
 const MAX_SEGMENTS = 7;
 const MAX_SUGGESTIONS = 3;
+// A reply includes scene JSON and optional code / LaTeX boards, not just dialogue.
+// Keep a bounded budget with room to close the complete structure; this is a cap,
+// not a target reply length. Both models and the empty-response fallback share it.
+export const DEEPSEEK_MAX_OUTPUT_TOKENS = 4_096;
 const VALID_ROLES = new Set(["user", "assistant"]);
 const VALID_KINDS = new Set(["narration", "dialogue", "thought"]);
 const VALID_BLACKBOARD_KINDS = new Set(["code", "markdown", "math"]);
@@ -191,7 +195,7 @@ export function createDeepSeekBody({
     thinking: { type: "disabled" },
     response_format: { type: outputFormat },
     stream: true,
-    max_tokens: 1_600,
+    max_tokens: DEEPSEEK_MAX_OUTPUT_TOKENS,
     user_id: `jingyu_${sessionId.replaceAll("-", "")}`,
   };
 }

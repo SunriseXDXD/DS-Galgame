@@ -36,6 +36,16 @@ export class ApiEmptyResponseError extends Error {
   }
 }
 
+export class ApiTruncatedResponseError extends Error {
+  readonly stats: Readonly<ApiStreamStats>;
+
+  constructor(stats: ApiStreamStats) {
+    super("本次回答达到长度上限，未完整生成。请把问题拆成更小的一步后重试。");
+    this.name = "ApiTruncatedResponseError";
+    this.stats = Object.freeze({ ...stats });
+  }
+}
+
 export const INVALID_BYOK_KEY_MESSAGE =
   "只粘贴 sk-... 本体，勿含中文引号/全角符号/Bearer";
 
@@ -167,7 +177,7 @@ async function consumeSseResponse(
   if (!stats.done) throw new Error("DeepSeek 响应流未完整结束");
   if (stats.finishReason !== "stop") {
     if (stats.finishReason === "length") {
-      throw new Error("回答达到长度上限，请缩小问题后重试");
+      throw new ApiTruncatedResponseError(stats);
     }
     throw new Error(stats.finishReason
       ? `回答未正常结束（${stats.finishReason}）`

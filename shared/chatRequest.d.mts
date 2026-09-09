@@ -1,5 +1,6 @@
 export type NormalizedChatRole = "user" | "assistant";
 export type DeepSeekOutputFormat = "json_object" | "text";
+export const DEEPSEEK_MAX_OUTPUT_TOKENS: 4096;
 
 export interface NormalizedChatMessage {
   role: NormalizedChatRole;
@@ -20,7 +21,7 @@ export interface DeepSeekRequestBody {
   thinking: { type: "disabled" };
   response_format: { type: DeepSeekOutputFormat };
   stream: true;
-  max_tokens: 1600;
+  max_tokens: typeof DEEPSEEK_MAX_OUTPUT_TOKENS;
   user_id: string;
 }
 

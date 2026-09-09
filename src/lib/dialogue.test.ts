@@ -376,6 +376,25 @@ describe("parseScenePayload", () => {
 });
 
 describe("visual novel pagination", () => {
+  it("keeps the complete ending even when a reply exceeds the suggested segment count", () => {
+    const segments = Array.from({ length: 9 }, (_, index) => ({
+      kind: "dialogue",
+      text: index === 8 ? "最后得到完整结果，并已检查边界条件。" : `第${index + 1}段：${"这一页解释当前步骤，不应提前进入下一轮选项。".repeat(6)}`,
+      mood: "thinking",
+      ...(index === 4 ? { blackboard: { kind: "math", content: "x = 2" } } : {}),
+    }));
+    const scene = parseScenePayload(JSON.stringify({ mood: "thinking", segments, suggestions: ["换一道题"] }));
+    const pages = sceneToPages(scene);
+
+    // The prompt/history budget is not a limit on current-reply playback.
+    expect(scene.segments).toHaveLength(9);
+    expect(pages.length).toBeGreaterThan(segments.length);
+    expect(pages.map((page) => page.text).join("")).toBe(segments.map((segment) => segment.text).join(""));
+    expect(pages.at(-1)?.text).toBe(segments.at(-1)?.text);
+    expect(pages.filter((page) => page.blackboard)).toHaveLength(1);
+    expect(scene.suggestions).toEqual(["换一道题"]);
+  });
+
   it("splits at Chinese punctuation and keeps every character", () => {
     const source = "第一句话很短。第二句话也不长！第三句话用来测试分页。";
     const pages = paginateText(source, 14);

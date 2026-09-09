@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiEmptyResponseError, streamDeepSeek } from "./api";
+import { ApiEmptyResponseError, ApiTruncatedResponseError, streamDeepSeek } from "./api";
 import type { ChatTurn } from "../types";
 
 const sessionId = "123e4567-e89b-42d3-a456-426614174000";
@@ -64,6 +64,55 @@ describe("streamDeepSeek", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const requestBody = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)) as Record<string, unknown>;
     expect(requestBody).not.toHaveProperty("outputFormat");
+  });
+
+  it("preserves a long Chinese teaching reply through its last board and final choices", async () => {
+    // Deliberately larger than short-chat fixtures: JSON and board source share
+    // the provider's token cap. Character count is NOT an exact token count.
+    const segments = Array.from({ length: 7 }, (_, index) => ({
+      kind: "dialogue",
+      text: `第${index + 1}步：本鲸鱼先说明输入与边界，再看当前黑板上的对应示例。确认每一项的结果之后，我们再继续下一步，不要跳过验证。`,
+      mood: index === 6 ? "relieved" : "thinking",
+      action: index === 6 ? "explain" : "point",
+      ...(index < 5 ? {
+        blackboard: {
+          kind: index === 4 ? "math" : "code",
+          title: `第${index + 1}步`,
+          ...(index < 4 ? { language: "ts" } : {}),
+          content: index === 4
+            ? "\\sum_{i=1}^{n} x_i = n\\bar{x}"
+            : Array.from({ length: 20 }, (_, line) => (
+              `const sample${line} = values.map((value) => value * ${index * 20 + line + 1}).filter(Number.isFinite);`
+            )).join("\n"),
+        },
+      } : {}),
+    }));
+    const payload = JSON.stringify({ mood: "thinking", segments, suggestions: ["检查最后的结果"] });
+    const frames = Array.from({ length: Math.ceil(payload.length / 137) }, (_, index) => (
+      `data: ${JSON.stringify({ choices: [{ delta: { content: payload.slice(index * 137, (index + 1) * 137) } }] })}\n\n`
+    ));
+    const fetchMock = vi.fn(async () => streamResponse([
+      ...frames,
+      "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+      "data: [DONE]\n\n",
+    ]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await streamDeepSeek({
+      apiKey: "",
+      authMode: "server",
+      sessionId,
+      model: "deepseek-v4-flash",
+      messages,
+      signal: new AbortController().signal,
+    });
+
+    expect(payload.length).toBeGreaterThan(7_000);
+    expect(result).toBe(payload);
+    expect(JSON.parse(result).segments.at(-1)?.text).toContain("第7步");
+    expect(JSON.parse(result).segments[4].blackboard.content).toContain("\\bar{x}");
+    expect(JSON.parse(result).suggestions).toEqual(["检查最后的结果"]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("retries one empty structured response as text with the same request context", async () => {
@@ -277,7 +326,76 @@ describe("streamDeepSeek", () => {
       model: "deepseek-v4-pro",
       messages,
       signal: new AbortController().signal,
-    })).rejects.toThrow("长度上限");
+    })).rejects.toBeInstanceOf(ApiTruncatedResponseError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a length-finished response even if its scene JSON is syntactically complete", async () => {
+    const scene = JSON.stringify({
+      mood: "happy",
+      segments: [{ kind: "dialogue", text: "还没有讲完。" }],
+      suggestions: ["不要提前显示的选项"],
+    });
+    const fetchMock = vi.fn(async () => streamResponse([
+      `data: ${JSON.stringify({ choices: [{ delta: { content: scene }, finish_reason: "length" }] })}\n\n`,
+      "data: [DONE]\n\n",
+    ]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(streamDeepSeek({
+      apiKey: "",
+      authMode: "server",
+      sessionId,
+      model: "deepseek-v4-flash",
+      messages,
+      signal: new AbortController().signal,
+    })).rejects.toMatchObject({
+      name: "ApiTruncatedResponseError",
+      message: "本次回答达到长度上限，未完整生成。请把问题拆成更小的一步后重试。",
+      stats: { finishReason: "length", done: true, contentCharacters: scene.length },
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not make a third paid attempt when the empty-response fallback hits the token cap", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(streamResponse([
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+      ]))
+      .mockResolvedValueOnce(streamResponse([
+        "data: {\"choices\":[{\"delta\":{\"content\":\"未完成的重试\"},\"finish_reason\":\"length\"}]}\n\n",
+        "data: [DONE]\n\n",
+      ]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(streamDeepSeek({
+      apiKey: "",
+      authMode: "server",
+      sessionId,
+      model: "deepseek-v4-flash",
+      messages,
+      signal: new AbortController().signal,
+    })).rejects.toBeInstanceOf(ApiTruncatedResponseError);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not accept complete-looking scene JSON after a stop frame without DONE", async () => {
+    const scene = JSON.stringify({ mood: "happy", segments: [{ kind: "dialogue", text: "正文。" }], suggestions: ["下一步"] });
+    const fetchMock = vi.fn(async () => streamResponse([
+      `data: ${JSON.stringify({ choices: [{ delta: { content: scene }, finish_reason: "stop" }] })}\n\n`,
+    ]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(streamDeepSeek({
+      apiKey: "",
+      authMode: "server",
+      sessionId,
+      model: "deepseek-v4-flash",
+      messages,
+      signal: new AbortController().signal,
+    })).rejects.toThrow("未完整结束");
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
