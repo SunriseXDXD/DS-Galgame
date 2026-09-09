@@ -1,4 +1,5 @@
 import type { AssistantScene } from "../types";
+import { segmentsToHistoryText } from "./dialogue";
 import { HUNGER_CUES } from "./emotions";
 
 function scene(
@@ -11,7 +12,7 @@ function scene(
     { kind: "narration", text: narration },
     ...lines.map((text) => ({ kind: "dialogue" as const, text })),
   ];
-  return { mood, segments, suggestions, rawText: segments.map((item) => item.text).join("\n") };
+  return { mood, segments, suggestions, rawText: segmentsToHistoryText(segments) };
 }
 
 function waitForDemo(signal: AbortSignal): Promise<void> {
@@ -34,6 +35,50 @@ function waitForDemo(signal: AbortSignal): Promise<void> {
 
 export async function demoReply(input: string, signal: AbortSignal): Promise<AssistantScene> {
   await waitForDemo(signal);
+
+  if (/公式|latex/i.test(input)) {
+    const segments: AssistantScene["segments"] = [
+      {
+        kind: "dialogue",
+        text: "本鲸鱼用一道二次方程演示配方法。先把常数项移到右边，一步一步看。",
+        mood: "thinking",
+        action: "explain",
+        blackboard: {
+          kind: "math",
+          title: "1/3 · 移项",
+          content: "x^2 - 6x + 5 = 0 \\quad\\Longrightarrow\\quad x^2 - 6x = -5",
+        },
+      },
+      {
+        kind: "dialogue",
+        text: "-6 的一半是 -3，它的平方是 9。两边同时加 9，左边就配成了完全平方。",
+        mood: "thinking",
+        action: "point",
+        blackboard: {
+          kind: "math",
+          title: "2/3 · 配成平方",
+          content: "x^2 - 6x + 9 = -5 + 9 \\quad\\Longrightarrow\\quad (x-3)^2 = 4",
+        },
+      },
+      {
+        kind: "dialogue",
+        text: "别漏了负号的情况！开平方得到正负 2，所以 x 是 1 或 5；代回原式都成立。",
+        mood: "relieved",
+        action: "point",
+        blackboard: {
+          kind: "math",
+          title: "3/3 · 求根与检查",
+          content: "x - 3 = \\pm\\sqrt{4} = \\pm 2 \\quad\\Longrightarrow\\quad x \\in \\{1, 5\\}",
+        },
+      },
+    ];
+    return {
+      mood: "thinking",
+      segments,
+      suggestions: ["公式分步演示", "看看代码讲解", "用 Markdown 清单演示"],
+      rawText: segmentsToHistoryText(segments),
+    };
+  }
 
   if (/动作差分演示/.test(input)) {
     const segments: AssistantScene["segments"] = [
@@ -66,7 +111,7 @@ export async function demoReply(input: string, signal: AbortSignal): Promise<Ass
       mood: "excited",
       segments,
       suggestions: ["动作差分演示", "看看代码讲解", "继续聊天"],
-      rawText: segments.map((item) => item.text).join("\n"),
+      rawText: segmentsToHistoryText(segments),
     };
   }
 
@@ -75,22 +120,46 @@ export async function demoReply(input: string, signal: AbortSignal): Promise<Ass
       { kind: "narration", text: "她把一块小黑板推到身旁，抬手示意你看向板面。", mood: "thinking" },
       {
         kind: "dialogue",
-        text: "先看一个最小的 TypeScript 例子，代码放在黑板上会更清楚。",
+        text: "先约定输入和输出：name 是字符串，箭头后面生成一句问候。这里只看函数本身。",
         mood: "thinking",
         action: "explain",
+        blackboard: {
+          kind: "code",
+          language: "ts",
+          title: "1/3 · 定义函数",
+          content: "const greet = (name: string) => `你好，${name}！`;",
+        },
       },
       {
         kind: "dialogue",
-        text: "```ts\nconst greet = (name: string) => `你好，${name}！`;\n\nconsole.log(greet(\"饲养员\"));\n```",
+        text: "再传入「饲养员」。模板字符串把 name 换成实参，得到这句问候。",
+        mood: "thinking",
+        action: "point",
+        blackboard: {
+          kind: "code",
+          language: "ts",
+          title: "2/3 · 调用与结果",
+          content: "greet(\"饲养员\");\n// 返回：你好，饲养员！",
+        },
+      },
+      {
+        kind: "dialogue",
+        text: "最后用 console.log 打印结果。完整 TypeScript 代码在这，换个名字也可以试试。",
         mood: "proud",
         action: "point",
+        blackboard: {
+          kind: "code",
+          language: "ts",
+          title: "3/3 · 完整示例",
+          content: "const greet = (name: string) => `你好，${name}！`;\n\nconsole.log(greet(\"饲养员\"));",
+        },
       },
     ];
     return {
       mood: "thinking",
       segments,
       suggestions: ["解释这段代码", "换成 Python", "列出运行步骤"],
-      rawText: segments.map((item) => item.text).join("\n"),
+      rawText: segmentsToHistoryText(segments),
     };
   }
 
@@ -114,7 +183,7 @@ export async function demoReply(input: string, signal: AbortSignal): Promise<Ass
       mood: "proud",
       segments,
       suggestions: ["从第一步开始", "换成代码示例", "奖励白米饭"],
-      rawText: segments.map((item) => item.text).join("\n"),
+      rawText: segmentsToHistoryText(segments),
     };
   }
 

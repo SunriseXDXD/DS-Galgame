@@ -1747,6 +1747,52 @@ select:focus-visible {
 
 .toast.is-visible { opacity: 1; transform: translate(-50%, 0); }
 
+.memory-dock {
+  position: absolute;
+  z-index: 4;
+  top: 30px;
+  right: clamp(24px, 4vw, 66px);
+  max-width: 320px;
+  text-align: right;
+}
+
+.memory-dock > div { display: flex; justify-content: flex-end; gap: 6px; }
+.memory-dock button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: rgba(4, 25, 39, 0.86);
+  color: var(--cream);
+  font-size: 11px;
+  cursor: pointer;
+}
+.memory-dock button:hover { border-color: var(--aqua); color: var(--aqua-bright); }
+.memory-dock kbd { color: var(--muted); font: 9px ui-monospace, monospace; }
+.memory-dock > small {
+  display: block;
+  overflow: hidden;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 620px) {
+  .memory-dock { top: 12px; right: 12px; left: 12px; max-width: none; }
+  .memory-dock > div { justify-content: center; }
+  .memory-dock > small { text-align: center; }
+  .game-stage > .location-card { display: none; }
+  .game-stage--blackboard .memory-dock { display: none; }
+}
+@media (max-height: 560px) and (orientation: landscape) {
+  .memory-dock { display: none; }
+}
+
 @media (max-width: 900px) {
   .game-header { height: 66px; padding: 0 18px; }
   .brand { min-width: auto; }
@@ -1786,7 +1832,7 @@ select:focus-visible {
   .key-persistence,
   .remembered-key-note { align-items: flex-start; flex-direction: column; gap: 10px; }
   .chapter-label { display: none; }
-  .header-actions .icon-button:nth-child(3) { display: none; }
+  .header-actions .icon-button:nth-child(4) { display: none; }
   .location-card { min-width: 145px; }
   .location-card strong { font-size: 12px; }
   .porthole { top: 16%; width: 92vw; }

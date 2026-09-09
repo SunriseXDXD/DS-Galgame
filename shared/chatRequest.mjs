@@ -4,6 +4,7 @@ const MAX_SEGMENTS = 7;
 const MAX_SUGGESTIONS = 3;
 const VALID_ROLES = new Set(["user", "assistant"]);
 const VALID_KINDS = new Set(["narration", "dialogue", "thought"]);
+const VALID_BLACKBOARD_KINDS = new Set(["code", "markdown", "math"]);
 const VALID_ACTIONS = new Set(["bashful", "cheer", "explain", "point"]);
 const VALID_MOODS = new Set([
   "neutral",
@@ -24,6 +25,24 @@ const VALID_MOODS = new Set([
   "determined",
 ]);
 
+function normalizeBlackboard(value) {
+  if (value === null) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  if (!VALID_BLACKBOARD_KINDS.has(value.kind) || typeof value.content !== "string") return undefined;
+  if (!value.content.trim() || Array.from(value.content).length > 16_000) return undefined;
+
+  const title = typeof value.title === "string" ? value.title.trim() : "";
+  const language = typeof value.language === "string" ? value.language.trim() : "";
+  return {
+    kind: value.kind,
+    content: value.content,
+    ...(title && Array.from(title).length <= 80 ? { title } : {}),
+    ...(language && language.length <= 20 && /^[A-Za-z0-9_+.-]+$/.test(language)
+      ? { language }
+      : {}),
+  };
+}
+
 function parseScene(content) {
   try {
     const value = JSON.parse(content);
@@ -39,11 +58,13 @@ function parseScene(content) {
       const action = typeof segment.action === "string" && VALID_ACTIONS.has(segment.action)
         ? segment.action
         : undefined;
+      const blackboard = normalizeBlackboard(segment.blackboard);
       return [{
         kind: segment.kind,
         text,
         mood,
         ...(action ? { action } : {}),
+        ...(blackboard !== undefined ? { blackboard } : {}),
       }];
     });
     if (!segments.length) return undefined;
@@ -68,14 +89,29 @@ function serializeScene(scene) {
   const serialized = JSON.stringify(scene);
   if (serialized.length <= MAX_CONTENT_LENGTH) return serialized;
 
-  const sourceSegments = scene.segments.map((segment) => ({
+  // Blackboard sources are atomic: truncating LaTeX or code can change their meaning.
+  // Remove the largest boards first, then apply the existing visible-text budget.
+  const segments = scene.segments.map((segment) => ({ ...segment }));
+  const boardIndexes = segments
+    .map((segment, index) => ({ index, length: JSON.stringify(segment.blackboard ?? null).length }))
+    .filter(({ index }) => segments[index].blackboard)
+    .sort((left, right) => right.length - left.length);
+  for (const { index } of boardIndexes) {
+    if (JSON.stringify({ ...scene, segments }).length <= MAX_CONTENT_LENGTH) break;
+    segments[index].blackboard = null;
+    segments[index].text += "（本步板书因历史长度限制已省略。）";
+  }
+  const budgetedScene = { ...scene, segments };
+  if (JSON.stringify(budgetedScene).length <= MAX_CONTENT_LENGTH) return JSON.stringify(budgetedScene);
+
+  const sourceSegments = segments.map((segment) => ({
     ...segment,
     characters: Array.from(segment.text),
   }));
   let low = 1;
   let high = Math.max(...sourceSegments.map((segment) => segment.characters.length));
   let best = JSON.stringify({
-    ...scene,
+    ...budgetedScene,
     segments: sourceSegments.map(({ characters, ...segment }) => ({
       ...segment,
       text: characters.slice(0, 1).join("").trimEnd(),
@@ -85,7 +121,7 @@ function serializeScene(scene) {
   while (low <= high) {
     const cap = Math.floor((low + high) / 2);
     const candidate = JSON.stringify({
-      ...scene,
+      ...budgetedScene,
       segments: sourceSegments.map(({ characters, ...segment }) => ({
         ...segment,
         text: characters.slice(0, cap).join("").trimEnd(),

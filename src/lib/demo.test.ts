@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { demoReply } from "./demo";
+import { sceneToPages } from "./dialogue";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -28,7 +29,7 @@ describe("demoReply", () => {
     const pending = demoReply(input, new AbortController().signal);
     await vi.advanceTimersByTimeAsync(620);
     const result = await pending;
-    expect(result.segments.some((segment) => segment.text.includes(marker))).toBe(true);
+    expect(result.rawText).toContain(marker);
     expect(new Set(result.segments.map((segment) => segment.mood)).size).toBeGreaterThan(1);
   });
 
@@ -53,7 +54,7 @@ describe("demoReply", () => {
   });
 
   it.each([
-    ["给我一个 TypeScript 代码示例", "```ts"],
+    ["给我一个 TypeScript 代码示例", "greet(\"饲养员\")"],
     ["用 Markdown 清单演示黑板", "# 今日计划"],
   ])("uses explain for teaching and point for the board in %s", async (input, boardMarker) => {
     vi.useFakeTimers();
@@ -62,7 +63,46 @@ describe("demoReply", () => {
     const result = await pending;
 
     expect(result.segments.find((segment) => segment.action === "explain")?.kind).toBe("dialogue");
-    expect(result.segments.find((segment) => segment.text.includes(boardMarker))?.action).toBe("point");
+    expect(result.segments.find((segment) => (segment.blackboard?.content ?? segment.text).includes(boardMarker))?.action).toBe("point");
+  });
+
+  it.each(["公式分步演示", "LaTeX 公式怎么显示", "展示 latex"])("teaches a quadratic equation with three boards for %s", async (input) => {
+    vi.useFakeTimers();
+    const pending = demoReply(input, new AbortController().signal);
+    await vi.advanceTimersByTimeAsync(620);
+    const result = await pending;
+    const boards = result.segments.map((segment) => segment.blackboard);
+
+    expect(boards.map((board) => board?.kind)).toEqual(["math", "math", "math"]);
+    expect(boards.map((board) => board?.title)).toEqual(["1/3 · 移项", "2/3 · 配成平方", "3/3 · 求根与检查"]);
+    expect(boards[0]?.content).not.toContain("\\{1, 5\\}");
+    expect(boards[1]?.content).toContain("(x-3)^2 = 4");
+    expect(boards[2]?.content).toContain("\\pm\\sqrt{4}");
+    expect(boards[2]?.content).toContain("\\{1, 5\\}");
+    expect(result.segments[0].action).toBe("explain");
+    expect(result.segments.slice(1).every((segment) => segment.action === "point")).toBe(true);
+    expect(result.rawText).toContain("$$");
+    expect(result.rawText).toContain("x^2 - 6x = -5");
+    expect(result.rawText).not.toContain('"blackboard"');
+    expect(sceneToPages(result).filter((page) => page.blackboard?.kind === "math")).toHaveLength(3);
+  });
+
+  it("only reveals the full code after explaining its definition and call", async () => {
+    vi.useFakeTimers();
+    const pending = demoReply("代码分步讲解", new AbortController().signal);
+    await vi.advanceTimersByTimeAsync(620);
+    const result = await pending;
+    const boards = result.segments.flatMap((segment) => segment.blackboard ? [segment.blackboard] : []);
+
+    expect(boards).toHaveLength(3);
+    expect(boards[0].content).toContain("const greet");
+    expect(boards[0].content).not.toContain("console.log");
+    expect(boards[1].content).toContain("// 返回：你好，饲养员！");
+    expect(boards[1].content).not.toContain("const greet");
+    expect(boards[2].content).toContain("const greet");
+    expect(boards[2].content).toContain("console.log");
+    expect(result.rawText).toContain("```ts");
+    expect(result.segments.every((segment) => !segment.text.includes("```"))).toBe(true);
   });
 
   it("does not add lecture actions to ordinary small talk", async () => {

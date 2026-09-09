@@ -35,6 +35,8 @@ export interface SceneSegment {
   text: string;
   mood?: Emotion;
   action?: CharacterAction;
+  /** Omitted: retain the previous board; null: clear it; content: replace it. */
+  blackboard?: BlackboardContent | null;
 }
 
 export interface AssistantScene {
@@ -45,7 +47,7 @@ export interface AssistantScene {
 }
 
 export interface BlackboardContent {
-  kind: "code" | "markdown";
+  kind: "code" | "markdown" | "math";
   content: string;
   language?: string;
   title?: string;
@@ -53,7 +55,6 @@ export interface BlackboardContent {
 
 export interface DialoguePage extends SceneSegment {
   id: string;
-  blackboard?: BlackboardContent;
 }
 
 export interface ChatTurn {

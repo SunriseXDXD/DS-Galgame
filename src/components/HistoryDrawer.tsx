@@ -83,7 +83,7 @@ export function HistoryDrawer({ open, turns, onClose, onClear, onCopyResult }: H
         </div>
 
         <footer>
-          对话只保留在当前浏览器标签页；API Key 不进入记录。
+          本轮回想保留在当前标签页；自动/手动存档与收藏另存本机，可在“存档与回忆馆”管理。设置中的 API Key 不进入剧情记录。
         </footer>
       </aside>
     </>

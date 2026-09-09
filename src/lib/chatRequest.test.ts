@@ -86,6 +86,111 @@ describe("normalizeChatMessages", () => {
     expect(hostileToJsonBudget.startsWith(scene.segments[0].text)).toBe(true);
   });
 
+  it("preserves allowlisted teaching boards, retain semantics and explicit clearing", () => {
+    const scene = JSON.stringify({
+      mood: "thinking",
+      segments: [
+        {
+          kind: "dialogue", text: "看公式。", action: "point",
+          blackboard: { kind: "math", content: "\\frac{1}{2}", title: "  1/3 · 公式  ", apiKey: "secret" },
+        },
+        {
+          kind: "dialogue", text: "看代码。",
+          blackboard: { kind: "code", content: "const x = 1;", language: "ts", debug: "secret" },
+        },
+        { kind: "dialogue", text: "继续讲解。" },
+        { kind: "dialogue", text: "先擦掉。", blackboard: null },
+        { kind: "dialogue", text: "再看清单。", blackboard: { kind: "markdown", content: "# 检查\n- 第一步" } },
+      ],
+      suggestions: [],
+    });
+    const normalized = normalizeChatMessages([{ role: "user", content: "讲解" }, { role: "assistant", content: scene }]);
+    const decoded = JSON.parse(normalized[1].content);
+
+    expect(decoded.segments[0].blackboard).toEqual({ kind: "math", content: "\\frac{1}{2}", title: "1/3 · 公式" });
+    expect(decoded.segments[1].blackboard).toEqual({ kind: "code", content: "const x = 1;", language: "ts" });
+    expect(decoded.segments[2]).not.toHaveProperty("blackboard");
+    expect(decoded.segments[3]).toHaveProperty("blackboard", null);
+    expect(decoded.segments[4].blackboard).toEqual({ kind: "markdown", content: "# 检查\n- 第一步" });
+    expect(normalized[1].content).not.toContain("secret");
+    expect(normalizeChatMessages(normalized)).toEqual(normalized);
+  });
+
+  it.each([
+    ["primitive", "formula"],
+    ["array", []],
+    ["unsupported kind", { kind: "html", content: "<script>alert(1)</script>" }],
+    ["object content", { kind: "math", content: { apiKey: "secret" } }],
+    ["blank content", { kind: "math", content: "  " }],
+    ["oversized content", { kind: "math", content: "x".repeat(16_001) }],
+  ])("drops an invalid %s board without losing its spoken explanation", (_case, blackboard) => {
+    const [, message] = normalizeChatMessages([
+      { role: "user", content: "继续" },
+      { role: "assistant", content: JSON.stringify({ mood: "thinking", segments: [{ kind: "dialogue", text: "讲解还在。", blackboard }] }) },
+    ]);
+
+    expect(JSON.parse(message.content).segments).toEqual([{ kind: "dialogue", text: "讲解还在。", mood: "thinking" }]);
+  });
+
+  it("drops invalid board labels and language while retaining valid source", () => {
+    const [, message] = normalizeChatMessages([
+      { role: "user", content: "继续" },
+      { role: "assistant", content: JSON.stringify({
+        mood: "thinking",
+        segments: [
+          { kind: "dialogue", text: "第一步。", blackboard: { kind: "code", content: "x", language: "<script>", title: "鲸".repeat(81) } },
+          { kind: "dialogue", text: "第二步。", blackboard: { kind: "code", content: "y", language: "x".repeat(21), title: { apiKey: "secret" } } },
+          { kind: "dialogue", text: "第三步。", blackboard: { kind: "code", content: "z", language: "c++", title: "鲸".repeat(80) } },
+        ],
+      }) },
+    ]);
+    const boards = JSON.parse(message.content).segments.map((segment: { blackboard: unknown }) => segment.blackboard);
+
+    expect(boards[0]).toEqual({ kind: "code", content: "x" });
+    expect(boards[1]).toEqual({ kind: "code", content: "y" });
+    expect(boards[2]).toEqual({ kind: "code", content: "z", language: "c++", title: "鲸".repeat(80) });
+    expect(message.content).not.toContain("secret");
+  });
+
+  it("fits escaped multi-board history within 8000 without cutting a formula", () => {
+    const hugeFormula = `\\begin{aligned}${"a&=\\frac{1}{2}\\\\\n".repeat(400)}\\end{aligned}`;
+    const smallFormula = "x=\\pm 2";
+    const normalized = normalizeChatMessages([
+      { role: "user", content: "复习公式" },
+      { role: "assistant", content: JSON.stringify({
+        mood: "thinking",
+        segments: [
+          { kind: "dialogue", text: "这一步先展开。", blackboard: { kind: "math", content: hugeFormula } },
+          { kind: "dialogue", text: "最后得到两个值。", blackboard: { kind: "math", content: smallFormula } },
+        ],
+      }) },
+    ]);
+    const decoded = JSON.parse(normalized[1].content);
+
+    expect(normalized[1].content.length).toBeLessThanOrEqual(8_000);
+    expect(decoded.segments[0].blackboard).toBeNull();
+    expect(decoded.segments[0].text).toContain("板书因历史长度限制已省略");
+    expect(decoded.segments[1].blackboard.content).toBe(smallFormula);
+    expect(normalizeChatMessages(normalized)).toEqual(normalized);
+  });
+
+  it("still bounds dialogue after omitting all boards from an oversized scene", () => {
+    const normalized = normalizeChatMessages([
+      { role: "user", content: "讲解" },
+      { role: "assistant", content: JSON.stringify({
+        mood: "thinking",
+        segments: Array.from({ length: 7 }, () => ({
+          kind: "dialogue", text: '鲸\\\"\n'.repeat(4_000),
+          blackboard: { kind: "math", content: "x=1" },
+        })),
+      }) },
+    ]);
+
+    expect(normalized[1].content.length).toBeLessThanOrEqual(8_000);
+    expect(JSON.parse(normalized[1].content).segments).toHaveLength(7);
+    expect(normalizeChatMessages(normalized)).toEqual(normalized);
+  });
+
   it("is idempotent for already-normalized assistant messages", () => {
     const once = normalizeChatMessages([
       { role: "user", content: "你好" },

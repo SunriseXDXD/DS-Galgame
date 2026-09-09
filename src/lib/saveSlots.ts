@@ -1,5 +1,5 @@
 import { CHARACTER_ACTIONS, EMOTIONS } from "../types";
-import type { AssistantScene, CharacterAction, ChatTurn, ModelId, SceneSegment } from "../types";
+import type { AssistantScene, BlackboardContent, CharacterAction, ChatTurn, ModelId, SceneSegment } from "../types";
 
 export const SAVE_SNAPSHOT_SCHEMA = "ds-galgame/save" as const;
 export const CURRENT_SAVE_SNAPSHOT_VERSION = 1 as const;
@@ -15,6 +15,8 @@ export const SAVE_LIMITS = Object.freeze({
   revisionCodePoints: 256,
   sceneSegments: 16,
   segmentTextCodePoints: 16_000,
+  blackboardContentCodePoints: 16_000,
+  blackboardTitleCodePoints: 80,
   sceneRawTextCodePoints: 32_000,
   suggestions: 8,
   suggestionCodePoints: 128,
@@ -177,7 +179,9 @@ const METADATA_KEYS = new Set([
 ]);
 const STATE_KEYS = new Set(["scene", "pageIndex", "history", "model"]);
 const SCENE_KEYS = new Set(["mood", "segments", "suggestions", "rawText"]);
-const SEGMENT_KEYS = new Set(["kind", "text", "mood", "action"]);
+const SEGMENT_KEYS = new Set(["kind", "text", "mood", "action", "blackboard"]);
+const BLACKBOARD_KEYS = new Set(["kind", "content", "title", "language"]);
+const BLACKBOARD_KINDS = new Set(["code", "markdown", "math"]);
 const TURN_KEYS = new Set(["id", "role", "content", "mood", "createdAt"]);
 
 type StructureInspectionResult = "safe" | "credential" | "limit" | "invalid";
@@ -320,13 +324,25 @@ function isCharacterAction(value: unknown): value is CharacterAction {
   return typeof value === "string" && CHARACTER_ACTION_IDS.has(value);
 }
 
+function isBlackboardContent(value: unknown): value is BlackboardContent {
+  return isRecord(value) &&
+    hasStrictKeys(value, BLACKBOARD_KEYS, ["kind", "content"]) &&
+    typeof value.kind === "string" && BLACKBOARD_KINDS.has(value.kind) &&
+    isBoundedString(value.content, SAVE_LIMITS.blackboardContentCodePoints) && value.content.trim().length > 0 &&
+    (value.title === undefined || isBoundedString(value.title, SAVE_LIMITS.blackboardTitleCodePoints)) &&
+    (value.language === undefined || (
+      isBoundedString(value.language, 20) && /^[A-Za-z0-9_+.-]*$/.test(value.language)
+    ));
+}
+
 function isSceneSegment(value: unknown): value is SceneSegment {
   if (!isRecord(value)) return false;
   return hasStrictKeys(value, SEGMENT_KEYS, ["kind", "text"]) &&
     isBoundedString(value.text, SAVE_LIMITS.segmentTextCodePoints) &&
     typeof value.kind === "string" && SEGMENT_KINDS.has(value.kind) &&
     (value.mood === undefined || isEmotion(value.mood)) &&
-    (value.action === undefined || isCharacterAction(value.action));
+    (value.action === undefined || isCharacterAction(value.action)) &&
+    (value.blackboard === undefined || value.blackboard === null || isBlackboardContent(value.blackboard));
 }
 
 function isAssistantScene(value: unknown): value is AssistantScene {
@@ -438,6 +454,14 @@ function cloneScene(scene: AssistantScene): AssistantScene {
       text: segment.text,
       ...(segment.mood ? { mood: segment.mood } : {}),
       ...(segment.action !== undefined ? { action: segment.action } : {}),
+      ...(segment.blackboard !== undefined ? {
+        blackboard: segment.blackboard === null ? null : {
+          kind: segment.blackboard.kind,
+          content: segment.blackboard.content,
+          ...(segment.blackboard.title !== undefined ? { title: segment.blackboard.title } : {}),
+          ...(segment.blackboard.language !== undefined ? { language: segment.blackboard.language } : {}),
+        },
+      } : {}),
     });
   }
 

@@ -129,6 +129,46 @@ describe("save snapshot schema", () => {
     });
   });
 
+  it("round-trips independent formula/code boards and explicit clearing without changing legacy V1", () => {
+    const input = captureInput();
+    input.scene.segments = [
+      { kind: "dialogue", text: "先整理方程。", blackboard: { kind: "math", content: String.raw`x^2 - 5x + 6 = 0`, title: "原式" } },
+      { kind: "dialogue", text: "继续看这块黑板。" },
+      { kind: "dialogue", text: "再看看代码。", blackboard: { kind: "code", content: "const x = 2;", language: "ts" } },
+      { kind: "dialogue", text: "讲解结束。", blackboard: null },
+    ];
+    const snapshot = captureSaveSnapshot(input);
+    expect(decodeSaveSnapshot(JSON.stringify(snapshot))).toEqual({ ok: true, snapshot });
+    expect(snapshot.version).toBe(1);
+    expect(snapshot.state.scene.segments[0].blackboard).not.toBe(input.scene.segments[0].blackboard);
+    input.scene.segments[0].blackboard!.content = "changed";
+    expect(snapshot.state.scene.segments[0].blackboard?.content).toBe("x^2 - 5x + 6 = 0");
+    expect(snapshot.state.scene.segments[1]).not.toHaveProperty("blackboard");
+    expect(snapshot.state.scene.segments[3].blackboard).toBeNull();
+    expect(decodeSaveSnapshot(captureSaveSnapshot(captureInput())).ok).toBe(true);
+  });
+
+  it("rejects invalid, credential-bearing and oversized persisted blackboard fields", () => {
+    const snapshot = captureSaveSnapshot(captureInput());
+    for (const blackboard of [
+      { kind: "html", content: "<b>unsafe</b>" },
+      { kind: "math", content: "" },
+      { kind: "math", content: "x", apiKey: "fake-never-store" },
+      { kind: "code", content: "x", debug: true },
+      { kind: "code", content: "x", language: "javascript onclick" },
+      { kind: "math", content: "x", title: "鲸".repeat(81) },
+      { kind: "math", content: "x".repeat(SAVE_LIMITS.blackboardContentCodePoints + 1) },
+    ]) {
+      const candidate = {
+        ...snapshot,
+        state: { ...snapshot.state, scene: { ...snapshot.state.scene, segments: [
+          { kind: "dialogue", text: "看看这里。", blackboard },
+        ] } },
+      };
+      expect(decodeSaveSnapshot(candidate)).toMatchObject({ ok: false, error: { code: "invalid_snapshot" } });
+    }
+  });
+
   it("rejects unknown fields at every V1 layer and returns a canonical copy", () => {
     const snapshot = captureSaveSnapshot(captureInput());
     const source = JSON.parse(JSON.stringify(snapshot)) as Record<string, unknown>;

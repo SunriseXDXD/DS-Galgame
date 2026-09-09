@@ -1,9 +1,15 @@
 import { useId, useMemo } from "react";
 import type { ReactNode } from "react";
 import type { BlackboardContent } from "../types";
+import { renderLatex } from "./blackboardLatex";
+import "./Blackboard.css";
 
 interface BlackboardProps {
   content?: BlackboardContent;
+  /** One-based board position, independent of dialogue text pagination. */
+  step?: { current: number; total: number };
+  onPreviousStep?: () => void;
+  onNextStep?: () => void;
 }
 
 type MarkdownBlock =
@@ -12,15 +18,42 @@ type MarkdownBlock =
   | { kind: "quote"; text: string }
   | { kind: "list"; ordered: boolean; start?: number; items: string[] }
   | { kind: "table"; headers: string[]; rows: string[][] }
-  | { kind: "code"; language?: string; text: string };
+  | { kind: "code"; language?: string; text: string }
+  | { kind: "math"; text: string };
 
-const INLINE_TOKEN = /(`[^`\n]+`|\*\*[^*\n]+\*\*)/g;
 const HEADING = /^(#{1,6})[ \t]+(.+)$/;
 const UNORDERED_ITEM = /^\s*[-+*][ \t]+(.+)$/;
 const ORDERED_ITEM = /^\s*(\d+)[.)][ \t]+(.+)$/;
 const QUOTE = /^\s*>[ \t]?(.*)$/;
 const FENCE = /^\s*```([A-Za-z0-9_+.-]*)\s*$/;
 const TABLE_DIVIDER_CELL = /^:?-{3,}:?$/;
+const MATH_FENCE_LANGUAGES = new Set(["math", "latex", "tex"]);
+
+function MathFormula({ source, display = false }: { source: string; display?: boolean }) {
+  const result = useMemo(() => renderLatex(source, display), [source, display]);
+  const className = `blackboard__math${display ? " blackboard__math--display" : ""}`;
+  if (result.error !== undefined) {
+    return (
+      <span className={`${className} blackboard__math--fallback`}>
+        <code>{source}</code>
+        <span className="blackboard__math-note">{result.error}</span>
+      </span>
+    );
+  }
+  return <span className={className} dangerouslySetInnerHTML={{ __html: result.html }} />;
+}
+
+function isEscaped(source: string, index: number): boolean {
+  let backslashes = 0;
+  for (let cursor = index - 1; cursor >= 0 && source[cursor] === "\\"; cursor -= 1) backslashes += 1;
+  return backslashes % 2 === 1;
+}
+
+function findClosing(source: string, delimiter: string, start: number): number {
+  let cursor = source.indexOf(delimiter, start);
+  while (cursor !== -1 && isEscaped(source, cursor)) cursor = source.indexOf(delimiter, cursor + delimiter.length);
+  return cursor;
+}
 
 function tableCells(line: string): string[] {
   const trimmed = line.trim().replace(/^\|/, "").replace(/\|$/, "");
@@ -35,35 +68,70 @@ function isTableDivider(line: string): boolean {
 function renderInline(text: string, keyPrefix: string): ReactNode[] {
   const nodes: ReactNode[] = [];
   let cursor = 0;
-  let tokenIndex = 0;
+  let plain = "";
+  const flush = () => { if (plain) nodes.push(plain); plain = ""; };
 
-  for (const match of text.matchAll(INLINE_TOKEN)) {
-    const index = match.index ?? 0;
-    if (index > cursor) nodes.push(text.slice(cursor, index));
-
-    const token = match[0];
-    const key = `${keyPrefix}-${tokenIndex}`;
-    if (token.startsWith("`")) {
-      nodes.push(<code key={key}>{token.slice(1, -1)}</code>);
-    } else {
-      nodes.push(
-        <strong key={key}>
-          {renderInline(token.slice(2, -2), `${key}-strong`)}
-        </strong>,
-      );
+  while (cursor < text.length) {
+    const key = `${keyPrefix}-${cursor}`;
+    // Code spans take priority; their dollars and TeX commands stay literal.
+    if (text[cursor] === "`") {
+      const marker = text.slice(cursor).match(/^`+/)?.[0] || "`";
+      const end = text.indexOf(marker, cursor + marker.length);
+      if (end !== -1) {
+        flush();
+        nodes.push(<code key={key}>{text.slice(cursor + marker.length, end)}</code>);
+        cursor = end + marker.length;
+        continue;
+      }
+    }
+    if (text.startsWith("\\$", cursor)) {
+      plain += "$";
+      cursor += 2;
+      continue;
     }
 
-    cursor = index + token.length;
-    tokenIndex += 1;
-  }
+    const marker = text.startsWith("$$", cursor) ? "$$" :
+      text.startsWith("\\[", cursor) ? "\\[" :
+        text.startsWith("\\(", cursor) ? "\\(" : text[cursor] === "$" ? "$" : undefined;
+    if (marker && !isEscaped(text, cursor)) {
+      const closing = marker === "\\[" ? "\\]" : marker === "\\(" ? "\\)" : marker;
+      const end = findClosing(text, closing, cursor + marker.length);
+      const source = text.slice(cursor + marker.length, end);
+      // Single dollars must hug their formula, avoiding common "$5 and $10" prose.
+      if (end !== -1 && source.trim() && (marker !== "$" || (!/^\s|\s$/.test(source) && !source.includes("\n")))) {
+        flush();
+        nodes.push(<MathFormula key={key} source={source} display={marker === "$$" || marker === "\\["} />);
+        cursor = end + closing.length;
+        continue;
+      }
+      if (marker === "$$") {
+        // An unclosed display marker must not become a single-dollar formula
+        // when the scanner reaches its second dollar.
+        plain += marker;
+        cursor += marker.length;
+        continue;
+      }
+    }
 
-  if (cursor < text.length) nodes.push(text.slice(cursor));
+    if (text.startsWith("**", cursor)) {
+      const end = text.indexOf("**", cursor + 2);
+      if (end > cursor + 2) {
+        flush();
+        nodes.push(<strong key={key}>{renderInline(text.slice(cursor + 2, end), `${key}-strong`)}</strong>);
+        cursor = end + 2;
+        continue;
+      }
+    }
+    plain += text[cursor];
+    cursor += 1;
+  }
+  flush();
   return nodes;
 }
 
 function startsBlock(line: string): boolean {
   return HEADING.test(line) || UNORDERED_ITEM.test(line) || ORDERED_ITEM.test(line) ||
-    QUOTE.test(line) || FENCE.test(line);
+    QUOTE.test(line) || FENCE.test(line) || /^(?:\$\$|\\\[)/.test(line.trim());
 }
 
 function parseMarkdown(source: string): MarkdownBlock[] {
@@ -87,12 +155,25 @@ function parseMarkdown(source: string): MarkdownBlock[] {
         index += 1;
       }
       if (index < lines.length) index += 1;
-      blocks.push({
-        kind: "code",
-        language: fence[1] || undefined,
-        text: codeLines.join("\n"),
-      });
+      blocks.push(MATH_FENCE_LANGUAGES.has(fence[1].toLowerCase()) ? {
+        kind: "math", text: codeLines.join("\n"),
+      } : { kind: "code", language: fence[1] || undefined, text: codeLines.join("\n") });
       continue;
+    }
+
+    // Parse standalone display blocks before tables/lists; TeX can contain pipes.
+    const trimmed = line.trim();
+    const displayMarker = trimmed.startsWith("$$") ? "$$" : trimmed.startsWith("\\[") ? "\\[" : undefined;
+    if (displayMarker) {
+      const closing = displayMarker === "$$" ? "$$" : "\\]";
+      const remaining = lines.slice(index).join("\n").trimStart();
+      const end = findClosing(remaining, closing, displayMarker.length);
+      if (end !== -1 && !remaining.slice(end + closing.length).split("\n")[0].trim()) {
+        const consumed = remaining.slice(0, end + closing.length);
+        blocks.push({ kind: "math", text: consumed.slice(displayMarker.length, -closing.length).trim() });
+        index += consumed.split("\n").length;
+        continue;
+      }
     }
 
     const heading = line.match(HEADING);
@@ -161,7 +242,7 @@ function parseMarkdown(source: string): MarkdownBlock[] {
       paragraphLines.push(lines[index].trim());
       index += 1;
     }
-    blocks.push({ kind: "paragraph", text: paragraphLines.join(" ") });
+    blocks.push({ kind: "paragraph", text: paragraphLines.join("\n") });
   }
 
   return blocks;
@@ -190,6 +271,7 @@ function renderMarkdown(blocks: MarkdownBlock[]): ReactNode[] {
     if (block.kind === "quote") {
       return <blockquote key={key}>{renderInline(block.text, key)}</blockquote>;
     }
+    if (block.kind === "math") return <MathFormula key={key} source={block.text} display />;
     if (block.kind === "code") {
       return (
         <pre key={key} className="blackboard__code blackboard__code--fenced">
@@ -239,7 +321,7 @@ function renderMarkdown(blocks: MarkdownBlock[]): ReactNode[] {
   });
 }
 
-export function Blackboard({ content }: BlackboardProps) {
+export function Blackboard({ content, step, onPreviousStep, onNextStep }: BlackboardProps) {
   const headingId = useId();
   const markdownBlocks = useMemo(
     () => content?.kind === "markdown" ? parseMarkdown(content.content) : [],
@@ -249,20 +331,31 @@ export function Blackboard({ content }: BlackboardProps) {
   if (!content) return null;
 
   const language = content.kind === "code" ? content.language?.trim().slice(0, 20) : undefined;
-  const title = content.title?.trim() || (content.kind === "code" ? "代码摘录" : "鲸鱼黑板");
+  const title = content.title?.trim() || (content.kind === "code" ? "代码摘录" : content.kind === "math" ? "公式讲解" : "鲸鱼黑板");
+  const total = step && Number.isFinite(step.total) ? Math.max(1, Math.floor(step.total)) : 1;
+  const current = step && Number.isFinite(step.current) ? Math.max(1, Math.min(total, Math.floor(step.current))) : 1;
 
   return (
     <aside className={`blackboard blackboard--${content.kind}`} aria-labelledby={headingId}>
       <header className="blackboard__header">
-        <span className="blackboard__eyebrow">BLACKBOARD / {content.kind === "code" ? "CODE" : "NOTE"}</span>
+        <span className="blackboard__eyebrow">BLACKBOARD / {content.kind === "code" ? "CODE" : content.kind === "math" ? "MATH" : "NOTE"}</span>
         <h2 id={headingId}>{title}</h2>
-        <span className="blackboard__meta">{language || (content.kind === "code" ? "TEXT" : "MARKDOWN")}</span>
+        <span className="blackboard__meta">{language || (content.kind === "code" ? "TEXT" : content.kind === "math" ? "LATEX" : "MARKDOWN")}</span>
+        {step && (
+          <nav className="blackboard__steps" aria-label="分步板书">
+            <button type="button" onClick={onPreviousStep} disabled={!onPreviousStep || current <= 1}>上一板</button>
+            <span role="status" aria-live="polite">第 {current} / {total} 板</span>
+            <button type="button" onClick={onNextStep} disabled={!onNextStep || current >= total}>下一板</button>
+          </nav>
+        )}
       </header>
-      <div className="blackboard__body" tabIndex={0} aria-label="黑板内容，可滚动查看">
+      <div key={`${content.kind}:${content.content}`} className="blackboard__body" tabIndex={0} aria-label="黑板内容，可滚动查看">
         {content.kind === "code" ? (
           <pre className="blackboard__code">
             <code data-language={language}>{content.content}</code>
           </pre>
+        ) : content.kind === "math" ? (
+          <MathFormula source={content.content} display />
         ) : (
           <div className="blackboard__markdown">{renderMarkdown(markdownBlocks)}</div>
         )}

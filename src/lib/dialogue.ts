@@ -8,7 +8,7 @@ import {
   type SceneSegment,
   type SegmentKind,
 } from "../types";
-import { extractBlackboardPresentation } from "./blackboard";
+import { blackboardDialogueFallback, extractBlackboardPresentations, normalizeBlackboard } from "./blackboard";
 import { inferEmotion } from "./emotions";
 
 const VALID_KINDS = new Set<SegmentKind>(["narration", "dialogue", "thought"]);
@@ -346,10 +346,7 @@ function resolveFencedBody(body: string, depth: number): FencedResolution | unde
       return { text, payload: { kind: "text", value: text } };
     }
     if (resolved?.kind === "scene") {
-      const text = normalizeSegments(resolved.value)
-        .map((segment) => segment.text)
-        .filter(Boolean)
-        .join("\n") || EMPTY_RESPONSE_TEXT;
+      const text = segmentsToHistoryText(normalizeSegments(resolved.value)) || EMPTY_RESPONSE_TEXT;
       return { text, payload: resolved };
     }
     return {
@@ -436,10 +433,7 @@ function sanitizeVisibleText(value: unknown, depth = 0): string {
     const resolved = resolvePayload(candidate.value, depth + 1);
     if (resolved?.kind === "text") return sanitizeVisibleText(resolved.value, depth + 1);
     if (resolved?.kind === "scene") {
-      const nested = normalizeSegments(resolved.value)
-        .map((segment) => segment.text)
-        .filter(Boolean)
-        .join("\n");
+      const nested = segmentsToHistoryText(normalizeSegments(resolved.value));
       return nested || EMPTY_RESPONSE_TEXT;
     }
     return EMPTY_RESPONSE_TEXT;
@@ -458,7 +452,10 @@ function normalizeSegments(payload: Record<string, unknown>): SceneSegment[] {
   for (const candidate of candidates) {
     if (!candidate || typeof candidate !== "object") continue;
     const item = candidate as Record<string, unknown>;
-    const text = sanitizeVisibleText(item.text);
+    const blackboard = normalizeBlackboard(item.blackboard);
+    const text = sanitizeVisibleText(item.text) || (blackboard
+      ? blackboardDialogueFallback(blackboard.kind)
+      : blackboard === null ? "这一部分讲完了，我们先收起黑板。" : "");
     if (!text) continue;
     const kind = VALID_KINDS.has(item.kind as SegmentKind)
       ? (item.kind as SegmentKind)
@@ -472,6 +469,7 @@ function normalizeSegments(payload: Record<string, unknown>): SceneSegment[] {
       text,
       ...(mood ? { mood } : {}),
       ...(action ? { action } : {}),
+      ...(blackboard !== undefined ? { blackboard } : {}),
     });
   }
 
@@ -497,9 +495,23 @@ function fallbackSegments(raw: string): SceneSegment[] {
   return [{ kind: "dialogue", text }];
 }
 
+/** Keep the actual teaching source in conversation history, never its JSON envelope. */
+export function segmentsToHistoryText(segments: readonly SceneSegment[]): string {
+  return segments.map((segment) => {
+    const board = segment.blackboard;
+    if (!board) return segment.text;
+    if (board.kind === "math") return `${segment.text}\n\n$$\n${board.content}\n$$`;
+    // A longer fence preserves examples that themselves contain triple backticks.
+    const longestRun = Math.max(0, ...Array.from(board.content.matchAll(/`+/g), (match) => match[0].length));
+    const fence = "`".repeat(Math.max(3, longestRun + 1));
+    const language = board.kind === "markdown" ? "markdown" : board.language || "text";
+    return `${segment.text}\n\n${fence}${language}\n${board.content}\n${fence}`;
+  }).filter(Boolean).join("\n");
+}
+
 function sceneFromText(text: string): AssistantScene {
   const segments = fallbackSegments(text);
-  const combined = segments.map((segment) => segment.text).join("\n");
+  const combined = segmentsToHistoryText(segments);
   return {
     mood: inferEmotion(combined),
     segments,
@@ -511,7 +523,7 @@ function sceneFromText(text: string): AssistantScene {
 function sceneFromPayload(payload: Record<string, unknown>): AssistantScene | undefined {
   const segments = normalizeSegments(payload);
   if (!segments.length) return undefined;
-  const combined = segments.map((segment) => segment.text).join("\n");
+  const combined = segmentsToHistoryText(segments);
   const mood = VALID_MOODS.has(String(payload.mood))
     ? (payload.mood as Emotion)
     : inferEmotion(combined);
@@ -527,7 +539,27 @@ function sceneFromPayload(payload: Record<string, unknown>): AssistantScene | un
   return { mood, segments, suggestions, rawText: combined };
 }
 
+function sceneFromJsonValue(value: unknown): AssistantScene {
+  const resolved = resolvePayload(value);
+  if (resolved?.kind === "scene") return sceneFromPayload(resolved.value) ?? sceneFromText("");
+  if (resolved?.kind === "text") return sceneFromText(resolved.value);
+  if (value === null || typeof value === "number" || typeof value === "boolean") {
+    return sceneFromText(String(value));
+  }
+  return sceneFromText("");
+}
+
 export function parseScenePayload(raw: string): AssistantScene {
+  // Markdown markers inside JSON string fields are data, not outer fences.
+  // Parse a complete JSON envelope before scanning raw Markdown boundaries.
+  let completeJson: JsonCandidate | undefined;
+  try {
+    completeJson = { value: JSON.parse(raw.trim()) };
+  } catch {
+    // Plain text, outer JSON fences and recoverable provider prefixes follow.
+  }
+  if (completeJson) return sceneFromJsonValue(completeJson.value);
+
   const fenced = rewriteFencedEnvelopes(raw, 0);
   if (fenced.direct?.kind === "scene") {
     return sceneFromPayload(fenced.direct.value) ?? sceneFromText("");
@@ -545,15 +577,7 @@ export function parseScenePayload(raw: string): AssistantScene {
     return sceneFromText(recovered);
   }
 
-  const resolved = resolvePayload(candidate.value);
-  if (resolved?.kind === "scene") {
-    return sceneFromPayload(resolved.value) ?? sceneFromText("");
-  }
-  if (resolved?.kind === "text") return sceneFromText(resolved.value);
-  if (candidate.value === null || typeof candidate.value === "number" || typeof candidate.value === "boolean") {
-    return sceneFromText(String(candidate.value));
-  }
-  return sceneFromText("");
+  return sceneFromJsonValue(candidate.value);
 }
 
 function splitLongUnit(unit: string[], maxLength: number): string[][] {
@@ -626,8 +650,12 @@ export function paginateText(text: string, maxLength = 76): string[] {
 export function sceneToPages(scene: AssistantScene): DialoguePage[] {
   let count = 0;
   return scene.segments.flatMap((segment) => {
-    const presentation = extractBlackboardPresentation(segment.text);
-    return paginateText(presentation.dialogueText).map((text) => {
+    const presentations = segment.blackboard !== undefined
+      ? [{ dialogueText: segment.text || (segment.blackboard
+          ? blackboardDialogueFallback(segment.blackboard.kind) : "这一部分讲完了，我们先收起黑板。"),
+          blackboard: segment.blackboard }]
+      : extractBlackboardPresentations(segment.text);
+    return presentations.flatMap((presentation) => paginateText(presentation.dialogueText).map((text, index) => {
       const inferred = inferEmotion(text);
       return {
         id: `page-${count++}`,
@@ -635,8 +663,8 @@ export function sceneToPages(scene: AssistantScene): DialoguePage[] {
         text,
         mood: segment.mood ?? (inferred === "neutral" ? scene.mood : inferred),
         ...(segment.action ? { action: segment.action } : {}),
-        ...(presentation.blackboard ? { blackboard: presentation.blackboard } : {}),
+        ...(index === 0 && presentation.blackboard !== undefined ? { blackboard: presentation.blackboard } : {}),
       };
-    });
+    }));
   });
 }

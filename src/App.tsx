@@ -3,6 +3,7 @@ import {
   BookOpenText,
   CircleHelp,
   History,
+  Save,
   RotateCcw,
   Settings,
   Volume2,
@@ -15,6 +16,8 @@ import { CharacterStage } from "./components/CharacterStage";
 import { DialogueBox } from "./components/DialogueBox";
 import { HistoryDrawer } from "./components/HistoryDrawer";
 import { IconButton } from "./components/IconButton";
+import { MemoryLibrary } from "./components/MemoryLibrary";
+import type { MemoryLibraryTab } from "./components/MemoryLibrary";
 import { SettingsModal } from "./components/SettingsModal";
 import { ApiEmptyResponseError, ApiTimeoutError, streamDeepSeek } from "./lib/api";
 import {
@@ -25,6 +28,11 @@ import {
 } from "./lib/apiKeyStorage";
 import { demoReply } from "./lib/demo";
 import { parseScenePayload, sceneToPages } from "./lib/dialogue";
+import { getBlackboardState } from "./lib/blackboard";
+import { createAutosaveSession } from "./lib/autosaveSession";
+import { saveSlotRepository } from "./lib/localSaveRepository";
+import { restoreStoryState } from "./lib/storyMemory";
+import type { SaveGameStateV1, SaveSnapshot } from "./lib/saveSlots";
 import { EMOTIONS } from "./types";
 import type {
   AssistantScene,
@@ -137,6 +145,11 @@ export default function App() {
   const [streamLength, setStreamLength] = useState(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [memoryTab, setMemoryTab] = useState<MemoryLibraryTab | null>(null);
+  const [storyReady, setStoryReady] = useState(false);
+  const [autosaveEpoch, setAutosaveEpoch] = useState(0);
+  const [hasAutosave, setHasAutosave] = useState(false);
+  const [autosaveNotice, setAutosaveNotice] = useState("本地记忆 · 正在读取");
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [autoPlay, setAutoPlay] = useState(false);
   const [typeSpeed, setTypeSpeed] = useState(20);
@@ -147,30 +160,84 @@ export default function App() {
   const audioRef = useRef<AudioContext | null>(null);
   const connectionTouchedRef = useRef(false);
   const retryMessageRef = useRef("");
+  const requestVersionRef = useRef(0);
+  const autosaveRef = useRef<ReturnType<typeof createAutosaveSession> | null>(null);
   const [sessionId] = useState(createSessionId);
 
   const pages = useMemo(() => sceneToPages(scene), [scene]);
   const activePage = pages[Math.min(pageIndex, Math.max(0, pages.length - 1))];
-  const activeBlackboard = useMemo(() => {
-    if (waiting) return undefined;
-    for (let index = Math.min(pageIndex, pages.length - 1); index >= 0; index -= 1) {
-      if (pages[index]?.blackboard) return pages[index].blackboard;
-    }
-    return undefined;
-  }, [pageIndex, pages, waiting]);
+  const blackboardState = useMemo(() => getBlackboardState(pages, pageIndex), [pages, pageIndex]);
+  const activeBlackboard = waiting ? undefined : blackboardState.content;
   const stageMood = waiting ? "thinking" : activePage?.mood ?? scene.mood;
-  const overlayOpen = settingsOpen || historyOpen;
+  const overlayOpen = settingsOpen || historyOpen || memoryTab !== null;
   const apiKeyRemembered = storedApiKey !== null;
+  const storyState = useMemo<SaveGameStateV1>(() => ({
+    scene, pageIndex, history, model,
+  }), [scene, pageIndex, history, model]);
 
   const openSettings = useCallback(() => {
     setHistoryOpen(false);
+    setMemoryTab(null);
     setSettingsOpen(true);
   }, []);
 
   const openHistory = useCallback(() => {
     setSettingsOpen(false);
+    setMemoryTab(null);
     setHistoryOpen(true);
   }, []);
+
+  const openMemory = useCallback((tab: MemoryLibraryTab = "save") => {
+    setSettingsOpen(false);
+    setHistoryOpen(false);
+    setMemoryTab(tab);
+  }, []);
+
+  const navigateBoard = (targetPageIndex: number | undefined) => {
+    if (targetPageIndex === undefined || waiting || overlayOpen) return;
+    setAutoPlay(false);
+    setCharacterSpeaking(false);
+    setPageIndex(Math.max(0, Math.min(targetPageIndex, pages.length - 1)));
+  };
+
+  useEffect(() => {
+    const session = createAutosaveSession(saveSlotRepository);
+    autosaveRef.current = session;
+    let current = true;
+    void session.ready().then((result) => {
+      if (!current) return;
+      if (result.ok) {
+        setHasAutosave(result.value !== null);
+        setAutosaveNotice(result.value ? "本机已有进度 · 可读档继续" : "完成对话后自动记录进度");
+      } else if (result.error.code !== "aborted") {
+        setAutosaveNotice(`自动存档不可用：${result.error.message}`);
+      }
+    });
+    return () => {
+      current = false;
+      session.dispose();
+      if (autosaveRef.current === session) autosaveRef.current = null;
+    };
+  }, [autosaveEpoch]);
+
+  useEffect(() => {
+    // Do not overwrite a previous visit with the welcome screen, a partial reply or an error scene.
+    if (!storyReady || waiting || overlayOpen) return;
+    const session = autosaveRef.current;
+    if (!session) return;
+    const timer = window.setTimeout(() => {
+      void session.save(storyState).then((result) => {
+        if (autosaveRef.current !== session) return;
+        if (result.ok) {
+          setHasAutosave(true);
+          setAutosaveNotice("自动存档已写入本机");
+        } else if (result.error.code !== "aborted") {
+          setAutosaveNotice(`自动存档已暂停：${result.error.message}`);
+        }
+      });
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [storyState, storyReady, waiting, overlayOpen, autosaveEpoch]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -268,10 +335,16 @@ export default function App() {
         event.preventDefault();
         openHistory();
       }
+      const memoryKeys: Record<string, MemoryLibraryTab> = { s: "save", l: "load", g: "gallery" };
+      const tab = memoryKeys[event.key.toLowerCase()];
+      if (tab) {
+        event.preventDefault();
+        openMemory(tab);
+      }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [openHistory, overlayOpen]);
+  }, [openHistory, openMemory, overlayOpen]);
 
   const playSound = useCallback((kind: "advance" | "send") => {
     if (!soundEnabled) return;
@@ -301,7 +374,7 @@ export default function App() {
 
   const sendMessage = useCallback(async (message: string) => {
     const trimmed = message.trim();
-    if (!trimmed || waiting) return;
+    if (!trimmed || waiting || abortRef.current) return;
 
     if (/^(接入|打开).*(API|连接|设置)/i.test(trimmed)) {
       openSettings();
@@ -332,6 +405,7 @@ export default function App() {
     setStreamLength(0);
 
     const controller = new AbortController();
+    const requestVersion = ++requestVersionRef.current;
     abortRef.current = controller;
     const clientTimeout = window.setTimeout(() => controller.abort("timeout"), 95_000);
 
@@ -345,18 +419,23 @@ export default function App() {
           model,
           messages: pendingHistory,
           signal: controller.signal,
-          onDelta: (content) => setStreamLength(content.length),
+          onDelta: (content) => {
+            if (requestVersionRef.current === requestVersion) setStreamLength(content.length);
+          },
         }));
 
+      if (requestVersionRef.current !== requestVersion) return;
       if (controller.signal.aborted) {
         setHistory((current) => current.filter((turn) => turn.id !== userTurn.id));
         if (controller.signal.reason === "user") setToast("已停止生成");
         return;
       }
       showScene(nextScene);
+      setStoryReady(true);
       setHistory((current) => [...current, newTurn("assistant", nextScene.rawText, nextScene.mood)].slice(-60));
       if (connectionMode !== "demo") setApiVerified(true);
     } catch (error) {
+      if (requestVersionRef.current !== requestVersion) return;
       const abortedByClient = controller.signal.aborted;
       const cancelReason = controller.signal.reason;
       const canceled = cancelReason === "user" || cancelReason === "configuration" || cancelReason === "clear";
@@ -371,13 +450,16 @@ export default function App() {
       const timedOut = error instanceof ApiTimeoutError || (abortedByClient && cancelReason === "timeout");
       const emptyResponse = error instanceof ApiEmptyResponseError;
       const nextScene = errorScene(messageText, timedOut, emptyResponse);
+      setStoryReady(false);
       showScene(nextScene);
       if (!emptyResponse) setApiVerified(false);
     } finally {
       window.clearTimeout(clientTimeout);
-      if (abortRef.current === controller) abortRef.current = null;
-      setWaiting(false);
-      setStreamLength(0);
+      if (requestVersionRef.current === requestVersion) {
+        if (abortRef.current === controller) abortRef.current = null;
+        setWaiting(false);
+        setStreamLength(0);
+      }
     }
   }, [apiKey, apiKeyRemembered, configReady, connectionMode, history, model, openSettings, serverConfig.byokAllowed, serverConfig.serverKeyConfigured, sessionId, showScene, waiting]);
 
@@ -394,13 +476,43 @@ export default function App() {
   };
 
   const clearHistory = () => {
+    if (!window.confirm("开始新一轮对话？当前剧情将重置，已有本地存档和回忆收藏会保留。")) return;
+    requestVersionRef.current += 1;
     abortRef.current?.abort("clear");
+    abortRef.current = null;
+    autosaveRef.current?.dispose();
+    setAutosaveEpoch((value) => value + 1);
     retryMessageRef.current = "";
+    setWaiting(false);
+    setStreamLength(0);
+    setAutoPlay(false);
+    setStoryReady(false);
     setHistory([]);
     showScene(WELCOME_SCENE);
     setHistoryOpen(false);
-    setToast("新的一轮开始了");
+    setToast("新的一轮开始了；已有存档和回忆仍保留在本机");
   };
+
+  const restoreMemory = useCallback((snapshot: SaveSnapshot) => {
+    const restored = restoreStoryState(snapshot, configReady ? serverConfig.models : undefined);
+    requestVersionRef.current += 1;
+    abortRef.current?.abort("load");
+    abortRef.current = null;
+    autosaveRef.current?.dispose();
+    retryMessageRef.current = "";
+    setWaiting(false);
+    setStreamLength(0);
+    setAutoPlay(false);
+    setCharacterSpeaking(false);
+    setScene(restored.scene);
+    setPageIndex(restored.pageIndex);
+    setHistory([...restored.history]);
+    setModel(restored.model);
+    setStoryReady(true);
+    setAutosaveEpoch((value) => value + 1);
+    setMemoryTab(null);
+    setToast("已读档：分镜与对话记忆已恢复，连接设置保持不变");
+  }, [configReady, serverConfig.models]);
 
   const connectionLabel = connectionMode === "demo"
     ? "演示模式"
@@ -415,7 +527,11 @@ export default function App() {
       <Backdrop />
 
       <header className="game-header" inert={overlayOpen ? true : undefined}>
-        <button type="button" className="brand" onClick={() => showScene(WELCOME_SCENE)} aria-label="返回序章">
+        <button type="button" className="brand" onClick={() => {
+          if (waiting) return;
+          setStoryReady(false);
+          showScene(WELCOME_SCENE);
+        }} aria-label="返回序章">
           <span className="brand__mark"><Waves size={24} strokeWidth={1.6} /></span>
           <span className="brand__words"><strong>鲸语</strong><small>WHALE / LOGUE</small></span>
         </button>
@@ -437,6 +553,7 @@ export default function App() {
         <div className="header-actions">
           <IconButton label="新对话" onClick={clearHistory}><RotateCcw size={18} /></IconButton>
           <IconButton label="对话回想" onClick={openHistory}><History size={18} /></IconButton>
+          <IconButton label="存档与回忆馆" onClick={() => openMemory("save")}><Save size={18} /></IconButton>
           <IconButton label={soundEnabled ? "关闭音效" : "开启音效"} onClick={() => setSoundEnabled((value) => !value)}>
             {soundEnabled ? <Volume2 size={18} /> : <VolumeX size={18} />}
           </IconButton>
@@ -453,6 +570,15 @@ export default function App() {
           <strong>深海机房 · 夜</strong>
           <small>SEA LEVEL − 8,192 M</small>
         </div>
+
+        <nav className="memory-dock" aria-label="本地剧情记忆">
+          <div>
+            <button type="button" onClick={() => openMemory("save")}>存档 <kbd>S</kbd></button>
+            <button type="button" onClick={() => openMemory("load")}>{hasAutosave ? "读档继续" : "读档"} <kbd>L</kbd></button>
+            <button type="button" onClick={() => openMemory("gallery")}>回忆馆 <kbd>G</kbd></button>
+          </div>
+          <small title={autosaveNotice}>{autosaveNotice}</small>
+        </nav>
 
         <div className="side-note side-note--left">
           <BookOpenText size={14} />
@@ -472,7 +598,12 @@ export default function App() {
           typeSpeed={typeSpeed}
           blackboard={activeBlackboard}
         />
-        <Blackboard content={activeBlackboard} />
+        <Blackboard
+          content={activeBlackboard}
+          step={blackboardState.step}
+          onPreviousStep={blackboardState.previousPageIndex === undefined ? undefined : () => navigateBoard(blackboardState.previousPageIndex)}
+          onNextStep={blackboardState.nextPageIndex === undefined ? undefined : () => navigateBoard(blackboardState.nextPageIndex)}
+        />
 
         <DialogueBox
           page={activePage}
@@ -564,6 +695,17 @@ export default function App() {
           onClose={() => setHistoryOpen(false)}
           onClear={clearHistory}
           onCopyResult={(success) => setToast(success ? "回想已复制" : "复制失败，请手动选择文本")}
+        />
+      )}
+
+      {memoryTab !== null && (
+        <MemoryLibrary
+          initialTab={memoryTab}
+          state={storyState}
+          canCapture={!waiting}
+          onClose={() => setMemoryTab(null)}
+          onRestore={restoreMemory}
+          onNotice={setToast}
         />
       )}
 

@@ -1,0 +1,81 @@
+.blackboard .blackboard__steps {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+  color: #dbe9cd;
+  font-size: 11px;
+}
+
+.blackboard .blackboard__steps button {
+  min-height: 30px;
+  padding: 4px 10px;
+  border: 1px solid rgba(219, 233, 205, 0.24);
+  border-radius: 5px;
+  color: #eff3da;
+  background: rgba(209, 231, 194, 0.07);
+  font: inherit;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.blackboard .blackboard__steps button:disabled {
+  opacity: 0.36;
+  cursor: default;
+}
+
+.blackboard .blackboard__steps button:focus-visible {
+  outline: 2px solid #d8efad;
+  outline-offset: 2px;
+}
+
+.blackboard .blackboard__math {
+  max-width: 100%;
+  color: #eff5dd;
+  font-size: 1em;
+}
+
+.blackboard .blackboard__math--display {
+  display: block;
+  margin: 12px 0;
+  padding: 3px 2px;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.blackboard .blackboard__math math {
+  font-family: math, "STIX Two Math", "Cambria Math", serif;
+  font-size: 1.15em;
+}
+
+.blackboard .blackboard__math math[display="block"] {
+  width: max-content;
+  min-width: 0;
+  margin: 0;
+  text-align: left;
+}
+
+.blackboard .blackboard__math--fallback {
+  color: #f4dfad;
+}
+
+.blackboard .blackboard__math--fallback code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 11px/1.7 ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.blackboard .blackboard__math-note {
+  display: block;
+  margin-top: 5px;
+  color: #d6c69d;
+  font: 10px/1.5 system-ui, sans-serif;
+}
+
+@media (max-width: 620px) {
+  .blackboard .blackboard__steps { margin-top: 5px; gap: 5px; font-size: 10px; }
+  .blackboard .blackboard__steps button { min-height: 30px; padding: 4px 8px; }
+  .blackboard .blackboard__math--display { margin: 8px 0; }
+}
